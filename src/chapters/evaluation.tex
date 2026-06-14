@@ -1,4 +1,593 @@
 \chapter{Evaluation}
 \label{chapter:evaluation}
 
-\radu{Rezultate experimentale. Cea mai importanta sectiune din lucrare. Plot-urile le generezi direct in LaTeX pe baza datelor din directorul \texttt{data/}}
+Data collection ran on the OpenStack cluster described in
+Section~\ref{subsec:execution}. All preprocessing, model training, and
+evaluation was done on WSL2 using scikit-learn~\cite{scikit-learn} 1.6.1 on
+Python 3.10.12. Every accuracy figure in this chapter is a 5-fold
+GroupKFold cross-validation score at the condition level: all 10 repetitions
+of a condition stay in the same fold, preventing data leakage across splits.
+The out-of-bag (OOB) score is reported as a secondary check.
+
+% =============================================================================
+\section{Dataset}
+\label{sec:dataset}
+
+The full dataset contains 216,000 rows: 43,200 unique network conditions
+measured across five implementations. Conditions are defined by seven
+parameters: bandwidth (50--5,000\,Mbps), RTT (10--300\,ms), packet loss
+(0--2\%), jitter (0--10\,ms), bit corruption (0--0.5\%), and two competing
+traffic streams (none or 40\% of link rate for TCP and UDP independently).
+Each combination was repeated 10 times to average out measurement noise.
+
+One derived binary feature, \texttt{fc\_limited}, marks conditions where the
+bandwidth-delay product exceeds 32\,MB, twice msquic's 16\,MB default
+flow-control window. The threshold is set at twice the window as a
+conservative empirical boundary that captures the onset of the degradation
+regime:
+\[
+  \texttt{fc\_limited} = \mathbf{1}\!\left[
+    \frac{\text{bandwidth\_mbps} \times \text{rtt\_ms}}{8000} > 32
+  \right]
+\]
+This flag is relevant primarily in Stage~1, where it predicts msquic timeout
+risk at high BDP.
+
+A second dataset covers a systematic $20\times 20$ grid: bandwidth from 250
+to 5,000\,Mbps in 250\,Mbps steps, RTT from 15 to 300\,ms in 15\,ms steps.
+Each of the 400 cells was measured under four isolated conditions: no
+impairments, loss\,=\,2\%, jitter\,=\,10\,ms, and corruption\,=\,0.5\%.
+This dataset was collected after the main one and was not used for model
+training, it exists solely to generate the heatmap visualisations in the
+next section.
+
+% =============================================================================
+\section{Raw Performance}
+\label{sec:raw-perf}
+
+Before examining the recommender, it helps to see how the implementations
+actually behave. Figure~\ref{fig:goodput-heatmaps} shows median goodput for
+each implementation across the clean $20\times 20$ grid.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_goodput_heatmaps.pdf}
+  \caption{Median goodput (Mbps) per implementation across the $20\times 20$
+           bandwidth/RTT grid, clean condition. All panels share the same
+           colour scale.}
+  \label{fig:goodput-heatmaps}
+\end{figure}
+
+The differences are large. quiche peaks above 2,400\,Mbps at high bandwidth
+and low RTT, driven by Linux-specific GSO send-path and kernel pacing via
+\texttt{SO\_TXTIME}~\cite{cloudflare-quiche-gso}. TCP reaches similar peaks
+at low RTT. msquic performs well at moderate BDP. quic-go and mvfst cap
+out early and do not benefit from higher bandwidth.
+
+Raw goodput in isolation does not tell the whole story. Figure~\ref{fig:bw-utilization}
+shows the same data as a fraction of the configured bandwidth rather than as
+an absolute throughput number.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_bw_utilization.pdf}
+  \caption{Bandwidth utilisation (goodput / configured bandwidth, \%) for each
+           implementation in clean conditions. Darker cells indicate higher
+           fraction of line-rate achieved.}
+  \label{fig:bw-utilization}
+\end{figure}
+
+At low RTT, TCP and msquic nearly saturate the link. As RTT grows, every
+implementation degrades but at very different rates. At 5,000\,Mbps and
+300\,ms RTT (BDP $\approx 187$\,MB), quiche and quic-go fall below 2\%
+utilisation, unable to fill the pipe. msquic does better at 62\%, but is
+still far from line-rate. The link is not congested, which means the
+implementations are the bottleneck. This spread is one of the main things
+the recommender needs to capture.
+
+Figure~\ref{fig:winner-map-raw} shows which implementation has the highest
+raw goodput in each cell under clean conditions. TCP and msquic win most of
+the grid. quiche dominates at high BDP where its GSO-assisted send path
+compensates for its higher-latency userspace stack.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{src/img/eval/fig_winner_map_raw.pdf}
+  \caption{Best-goodput implementation per (bandwidth, RTT) cell, clean
+           condition. This map uses raw throughput only. Profile-aware maps
+           are shown in Section~\ref{sec:label-dist}.}
+  \label{fig:winner-map-raw}
+\end{figure}
+
+Under impairments, the picture changes. Figure~\ref{fig:degradation} shows
+how much goodput each implementation loses relative to its clean baseline
+when loss reaches 2\% or jitter 10\,ms.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_degradation.pdf}
+  \caption{Goodput change relative to the clean baseline under loss\,=\,2\%
+           (top row) and jitter\,=\,10\,ms (bottom row). Green = no change or
+           improvement, red = degradation.}
+  \label{fig:degradation}
+\end{figure}
+
+msquic degrades the most under loss in the low-BW, low-RTT region, the same
+conditions where it was strongest in the clean case. quiche is comparatively
+stable. The jitter row shows a more modest, spread-out degradation across
+all implementations.
+
+Figure~\ref{fig:condition-winners} brings this together: the best-goodput
+winner per cell under three conditions side by side.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_condition_winners.pdf}
+  \caption{Best-goodput winner per (bandwidth, RTT) cell under clean, loss\,=\,2\%,
+           and jitter\,=\,10\,ms. The winner shifts substantially as impairments
+           are introduced.}
+  \label{fig:condition-winners}
+\end{figure}
+
+In clean traffic, TCP and msquic win most of the grid. Introduce 2\% loss
+and quiche takes over a large portion while msquic retreats due to its
+higher timeout risk. At 10\,ms jitter the shift is subtler. The winner is
+not fixed: it depends on conditions, and that is the core motivation for
+building a recommender.
+
+One more raw metric before moving to the model: timeout rates. msquic times
+out on 12.41\% of conditions across the main dataset. Table~\ref{tab:timeouts}
+has the full breakdown. Figure~\ref{fig:timeout-rates} plots the same data
+against the 10\% elimination threshold.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Timeout counts and rates per implementation (43,200 runs each).}
+  \label{tab:timeouts}
+  \begin{tabular}{lrr}
+    \hline
+    \textbf{Implementation} & \textbf{Timed-out runs} & \textbf{Rate} \\
+    \hline
+    quic-go  &     0 &   0.00\% \\
+    tcp      &     1 &   0.00\% \\
+    quiche   &    95 &   0.22\% \\
+    mvfst    &   487 &   1.13\% \\
+    msquic   & 5,363 &  12.41\% \\
+    \hline
+    Total    & 5,946 &   2.75\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.6\textwidth]{src/img/eval/fig_timeout_rates.pdf}
+  \caption{Timeout rate per implementation across 43,200 conditions each.
+           The dashed line marks the 10\% Stage~1 elimination threshold.}
+  \label{fig:timeout-rates}
+\end{figure}
+
+msquic's timeouts are not uniformly distributed. The \texttt{fc\_limited}
+flag introduced in Section~\ref{subsec:fc-limited} is strongly correlated:
+msquic times out on 6.7\% of runs without flow-control limitation, and
+32.3\% with it. No other implementation exceeds a 1.2\% timeout rate. This
+is what Stage~1 of the recommender is built to predict.
+
+% =============================================================================
+\section{Profile Label Distributions}
+\label{sec:label-dist}
+
+Raw performance data shows that implementations differ, but choosing the right
+one depends on what the deployment cares about. The five profiles defined in
+Section~\ref{subsec:profiles} assign a composite score per implementation per
+condition using different weightings of goodput, latency, resource usage, and
+loss recovery. The winner under each profile becomes the training label for
+Stage~2.
+
+Figure~\ref{fig:winner-distribution} and Table~\ref{tab:winner-dist} show
+how often each implementation wins per profile.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_winner_distribution.pdf}
+  \caption{Fraction of the 43,200 conditions won by each implementation under
+           each profile's composite scoring. mvfst and quic-go win less than
+           1\% combined in every profile.}
+  \label{fig:winner-distribution}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Per-profile winner distribution: fraction of the 4,320 conditions
+           in which each implementation receives the highest composite score.}
+  \label{tab:winner-dist}
+  \begin{tabular}{lrrrrr}
+    \hline
+    \textbf{Profile} & \textbf{quiche} & \textbf{tcp} & \textbf{msquic}
+                     & \textbf{mvfst}  & \textbf{quic-go} \\
+    \hline
+    datacenter         & 90.2\% &  2.0\% &  7.8\% & 0.0\% & 0.0\% \\
+    lightweight        &  0.4\% & 99.4\% &  0.1\% & 0.0\% & 0.0\% \\
+    mobile\_lossy      & 66.3\% & 28.1\% &  5.1\% & 0.4\% & 0.1\% \\
+    latency\_sensitive & 39.7\% & 49.8\% & 10.1\% & 0.3\% & 0.1\% \\
+    deep\_space        & 46.2\% & 47.8\% &  4.8\% & 0.6\% & 0.6\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+The profiles produce very different answers. quiche wins 90.2\% of datacenter
+conditions because that profile weights goodput at 0.80 and quiche's GSO
+send path is the fastest on that metric. TCP wins 99.4\% of lightweight
+conditions because that profile weights server CPU at 0.30 and TCP's
+kernel-space stack consumes roughly five times less CPU than quiche at the
+same throughput, as measured in this dataset. The latency-sensitive and deep-space profiles produce near-ties
+between quiche and TCP (39.7\%/49.8\% and 46.2\%/47.8\% respectively),
+reflecting conditions where quiche's throughput advantage trades off against
+TCP's lower overhead. mvfst and quic-go never win enough to matter in any
+profile.
+
+Figure~\ref{fig:winner-maps-profiles} shows the same data spatially: which
+implementation wins per (bandwidth, RTT) cell for each profile.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_winner_maps_profiles.pdf}
+  \caption{Profile-aware best implementation per (bandwidth, RTT) cell.
+           Each panel applies one profile's scoring function to the visualisation dataset.}
+  \label{fig:winner-maps-profiles}
+\end{figure}
+
+The datacenter map is mostly quiche at high BDP and a mix at low BDP. The
+lightweight map is almost entirely TCP. The latency-sensitive and deep-space
+maps show the quiche/TCP split, with quiche stronger at mid-to-high BDP and
+TCP at the lower end. Comparing these maps to the raw goodput winner map in
+Figure~\ref{fig:winner-map-raw} shows how much the choice of scoring function
+changes the recommendation.
+
+Figure~\ref{fig:profile-disagreement} and Table~\ref{tab:disagreement}
+quantify how often pairs of profiles recommend different implementations
+for the same condition.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.6\textwidth]{src/img/eval/fig_profile_disagreement.pdf}
+  \caption{Pairwise profile disagreement: fraction of the 43,200 conditions
+           where two profiles recommend different implementations. The diagonal
+           is zero (a profile always agrees with itself).}
+  \label{fig:profile-disagreement}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Pairwise profile disagreement rates over all 4,320 conditions.}
+  \label{tab:disagreement}
+  \begin{tabular}{llrr}
+    \hline
+    \textbf{Profile A} & \textbf{Profile B} & \textbf{Disagreements} & \textbf{Rate} \\
+    \hline
+    datacenter         & lightweight         & 4,226 / 4,320 &  97.8\% \\
+    lightweight        & mobile\_lossy       & 3,089 / 4,320 &  71.5\% \\
+    datacenter         & latency\_sensitive  & 2,401 / 4,320 &  55.6\% \\
+    lightweight        & deep\_space         & 2,243 / 4,320 &  51.9\% \\
+    lightweight        & latency\_sensitive  & 2,163 / 4,320 &  50.1\% \\
+    datacenter         & deep\_space         & 2,087 / 4,320 &  48.3\% \\
+    mobile\_lossy      & latency\_sensitive  & 1,618 / 4,320 &  37.5\% \\
+    datacenter         & mobile\_lossy       & 1,204 / 4,320 &  27.9\% \\
+    latency\_sensitive & deep\_space         & 1,130 / 4,320 &  26.2\% \\
+    mobile\_lossy      & deep\_space         &   933 / 4,320 &  21.6\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+The extreme case is datacenter versus lightweight at 97.8\% disagreement.
+This is structural: quiche wins almost all datacenter conditions and TCP wins
+almost all lightweight conditions, so the two profiles can only agree in the
+narrow slice where the scoring crosses over. At the other end, mobile\_lossy
+and deep\_space disagree on just 21.6\% of conditions. Both profiles target
+high-impairment scenarios and their scoring ends up picking the same
+implementation for similar reasons. latency\_sensitive and deep\_space also
+agree frequently at 26.2\%, because their weight structures both penalise
+tail RTT in a way that happens to prefer the same candidate across most cells.
+
+% =============================================================================
+\section{Model Accuracy}
+\label{sec:model-accuracy}
+
+\subsection{Stage 1: timeout classifiers}
+\label{subsec:stage1-acc}
+
+Stage~1 trains one binary Random Forest per implementation to predict whether
+a given set of conditions will cause a timeout. Table~\ref{tab:stage1-acc}
+reports the results.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Stage~1 timeout classifier accuracy per implementation
+           (5-fold GroupKFold CV, with OOB as a secondary check).}
+  \label{tab:stage1-acc}
+  \begin{tabular}{lrrr}
+    \hline
+    \textbf{Implementation} & \textbf{CV accuracy} & \textbf{CV std} & \textbf{OOB} \\
+    \hline
+    quic-go  & 100.00\% & 0.00\%  & 100.00\% \\
+    tcp      &  99.998\% & 0.005\% &  99.977\% \\
+    quiche   &   99.49\% & 0.09\%  &   98.05\% \\
+    mvfst    &   96.43\% & 0.34\%  &   92.28\% \\
+    msquic   &   85.67\% & 0.59\%  &   83.31\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+quic-go and TCP are trivial cases: with zero and one timeout across 43,200
+runs respectively, predicting ``no timeout'' for every row achieves
+near-perfect accuracy by definition. The real results are quiche (99.49\%)
+and msquic (85.67\%). For msquic, the 85.67\% reflects a genuinely noisy
+decision boundary: even within the \texttt{fc\_limited} regime, some
+high-RTT conditions complete successfully and some do not, and no single
+feature cleanly separates them.
+
+\subsection{Stage 2: profile classifiers}
+\label{subsec:stage2-acc}
+
+Stage~2 trains one multiclass Random Forest per profile. Figure~\ref{fig:model-accuracy}
+shows both stages side by side and Table~\ref{tab:stage2-acc} has the numbers.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_model_accuracy.pdf}
+  \caption{Cross-validation accuracy for Stage~1 (left) and Stage~2 (right).
+           Error bars show standard deviation across five folds.}
+  \label{fig:model-accuracy}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Stage~2 profile classifier accuracy (5-fold GroupKFold CV).}
+  \label{tab:stage2-acc}
+  \begin{tabular}{lrrr}
+    \hline
+    \textbf{Profile} & \textbf{CV accuracy} & \textbf{CV std} & \textbf{OOB} \\
+    \hline
+    lightweight        & 99.42\% & 0.18\% & 99.40\% \\
+    datacenter         & 94.38\% & 0.75\% & 94.26\% \\
+    mobile\_lossy      & 83.38\% & 0.74\% & 83.59\% \\
+    deep\_space        & 80.58\% & 1.53\% & 80.76\% \\
+    latency\_sensitive & 67.80\% & 0.97\% & 67.80\% \\
+    \hline
+  \end{tabular}
+\end{table}
+
+Lightweight at 99.42\% carries the same caveat as the Stage~1 trivial cases:
+TCP wins 99.4\% of the labels, so the classifier barely needs to learn
+anything. Datacenter at 94.38\% is genuinely strong: the model correctly
+identifies the minority of conditions where msquic or TCP outscores quiche.
+CV and OOB scores match closely across all profiles, which means the
+GroupKFold splits are producing honest estimates with no repetition leakage.
+
+The latency-sensitive result of 67.80\% looks low, but Figure~\ref{fig:score-gap}
+and Table~\ref{tab:score-gap} explain it. For each condition, the \textit{score
+gap} is the difference between the top-ranked and second-ranked implementation
+under that profile's weighting. A gap below 0.05 means the two are
+effectively tied, and the label is essentially noise.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.65\textwidth]{src/img/eval/fig_score_gap.pdf}
+  \caption{Fraction of conditions per profile where the top-2 implementations
+           score within 5\% of each other. High ambiguity caps what the
+           classifier can achieve.}
+  \label{fig:score-gap}
+\end{figure}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Score gap statistics per profile. Ambiguous = top-vs-second gap
+           below 0.05.}
+  \label{tab:score-gap}
+  \begin{tabular}{lrr}
+    \hline
+    \textbf{Profile} & \textbf{Ambiguous conditions} & \textbf{Median gap} \\
+    \hline
+    datacenter         &  3.1\% & 0.507 \\
+    lightweight        &  0.9\% & 0.229 \\
+    mobile\_lossy      & 19.3\% & 0.140 \\
+    deep\_space        & 21.9\% & 0.116 \\
+    latency\_sensitive & 23.5\% & 0.111 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+For latency-sensitive, 23.5\% of conditions are ambiguous (median gap 0.111,
+the lowest in the table). A perfect classifier on the unambiguous subset would
+reach at most roughly 76.5\% and the observed 67.80\% is close to that ceiling.
+Label ambiguity, not model weakness, is the dominant cause.
+
+Datacenter is the opposite case: a median gap of 0.507 means quiche
+outscores the alternatives by a large margin in most conditions, and 94.38\%
+accuracy follows naturally.
+
+% =============================================================================
+\section{Feature Importance}
+\label{sec:feature-importance}
+
+Figure~\ref{fig:feature-importance} shows permutation importance for the
+Stage~2 classifiers. Permutation importance is used rather than mean
+decrease in impurity (MDI) because it is computed on held-out data and does
+not inflate importance for high-cardinality continuous features~\cite{strobl2007bias}.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/eval/fig_feature_importance.pdf}
+  \caption{Permutation importance for the Stage~2 ranker, grouped by profile.
+           Each group covers the eight input features. Error bars show standard
+           deviation across permutation runs.}
+  \label{fig:feature-importance}
+\end{figure}
+
+Four things stand out.
+
+\textbf{Loss is the top feature for three profiles.} For datacenter (0.143),
+mobile\_lossy (0.293), and deep\_space (0.292), packet loss has the highest
+permutation score. The goodput gap between implementations is widest under
+loss, because their congestion-control behaviours diverge the most when the
+network is lossy.
+
+\textbf{RTT leads for latency-sensitive.} The profile's 0.30 weight on tail
+RTT shifts dominance to rtt\_ms (0.262). Jitter, which is negligible in every
+other profile, rises to 0.139 here, the only context where per-packet delay
+variation carries meaningful discriminative power.
+
+\textbf{Lightweight is flat.} The maximum permutation score in the lightweight
+profile is 0.011. Since TCP wins 99.4\% of labels, almost any feature is
+sufficient to produce a correct prediction and none stands out. MDI values are
+substantially higher here, a known artefact of MDI overestimating importance
+in near-single-class problems~\cite{strobl2007bias}.
+
+\textbf{\texttt{fc\_limited} has consistently low Stage~2 importance.} Across
+all five profiles, \texttt{fc\_limited} sits at the bottom or near the bottom
+(range: 0.0002 to 0.025). Its role is in Stage~1, where it strongly predicts
+msquic timeout risk at high BDP. Once timeouts are handled, it adds little
+signal to the ranking decision.
+
+% =============================================================================
+\section{Live Prober Validation}
+\label{sec:prober-validation}
+
+The prober was run inside the same Docker topology used for data collection:
+a three-container setup with a probe server, a network simulator applying
+\texttt{tc netem} conditions, and a probe client. Each run used
+\texttt{--rounds~3} (three measurement iterations, results averaged) and the
+default 10\% timeout-elimination threshold. Bandwidth was supplied directly
+via \texttt{--bw} rather than measured by iperf3, to avoid saturating the
+netem buffer in the Docker Desktop WSL2 environment at low configured rates.
+
+Table~\ref{tab:prober-validation} summarises the five static profile tests.
+The prober reproduced configured RTT within 1\,ms in every case. Loss was
+amplified above the configured value in the mobile\_lossy and deep\_space
+scenarios: each packet crosses two netem qdiscs (one per direction), so the
+effective round-trip loss is $1-(1-p)^2$ rather than $p$.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Recommender validation: live prober results per deployment profile.
+           \texttt{--rounds~3}, 10\% elimination threshold. ``Measured'' columns
+           show values averaged across rounds as reported by the prober.}
+  \label{tab:prober-validation}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{lp{3.0cm}p{3.2cm}p{3.2cm}lr}
+    \hline
+    \textbf{Profile} & \textbf{Configured (netem)} & \textbf{Measured by prober}
+      & \textbf{Stage~1 eliminated} & \textbf{Rec.} & \textbf{Conf.} \\
+    \hline
+    datacenter &
+      BW 1\,000\,Mbps, RTT 10\,ms, loss 0\%, jitter 0\,ms &
+      BW 1\,000\,Mbps, RTT 10.3\,ms, loss 0\%, jitter 0.9\,ms &
+      none &
+      msquic$^*$ & 56.8\% \\
+    lightweight &
+      BW 50\,Mbps, RTT 30\,ms, loss 0\%, jitter 0\,ms &
+      BW 50\,Mbps, RTT 30.4\,ms, loss 0\%, jitter 2.3\,ms &
+      none &
+      quiche$^*$ & 57.7\% \\
+    mobile\_lossy &
+      BW 20\,Mbps, RTT 80\,ms, loss 2\%, jitter 5\,ms &
+      BW 20\,Mbps, RTT 81.6\,ms, loss 13.3\%$^\dagger$, jitter 9.0\,ms &
+      quiche (20.6\%), msquic (46.1\%) &
+      quiche$^\ddagger$ & 62.8\% \\
+    latency\_sensitive &
+      BW 500\,Mbps, RTT 150\,ms, loss 0.5\%, jitter 2\,ms &
+      BW 500\,Mbps, RTT 150.2\,ms, loss 0\%, jitter 12.0\,ms &
+      none &
+      msquic & 61.1\% \\
+    deep\_space &
+      BW 5\,Mbps, RTT 300\,ms, loss 3\%, jitter 10\,ms &
+      BW 5\,Mbps, RTT 299\,ms, loss 8.3\%$^\dagger$, jitter 27.7\,ms &
+      quiche (25.2\%), msquic (66.2\%), mvfst (52.4\%) &
+      tcp & 100\% \\
+    \hline
+    \multicolumn{6}{l}{$^*$ confidence below the 60\% stability threshold (recommendation is borderline).} \\
+    \multicolumn{6}{l}{$^\dagger$ measured loss exceeds configured. netem applies the rate independently on each leg.} \\
+    \multicolumn{6}{l}{$^\ddagger$ quiche ranked first by Stage~2 despite Stage~1 elimination (see text).} \\
+  \end{tabular}
+  }
+\end{table}
+
+The results break into three groups.
+
+\textbf{Unstable recommendations (datacenter, lightweight).} Both came back
+below the 60\% confidence threshold. At zero loss and low RTT, the scoring
+gap between the top candidates is narrow (consistent with the ambiguity
+data in Section~\ref{sec:model-accuracy}). The datacenter RTT of 10.3\,ms
+is also just below the training grid minimum of 15\,ms, so the model is
+mildly extrapolating. The prober correctly signals uncertainty rather than
+committing to a wrong recommendation.
+
+\textbf{Clear outcomes (latency-sensitive, deep\_space).} The
+latency-sensitive result (msquic, 61.1\%) is above the threshold and STABLE.
+Deep space is the clearest result in the whole test: three QUIC implementations
+eliminated by Stage~1, TCP at 100\% confidence. This makes sense: at 5\,Mbps
+and 300\,ms with elevated loss, quiche and msquic time out too often to be
+reliable, and mvfst also fails its Stage~1 gate. TCP's stable kernel stack is
+the only sensible choice.
+
+\textbf{Stage~1 and Stage~2 disagree (mobile\_lossy).} This is the most
+interesting case. quiche gets eliminated by Stage~1 at 20.6\% timeout
+probability, but Stage~2 still ranks it first at 62.8\%, above TCP at
+36.1\%. The measured loss was 13.3\%, far above the training range maximum
+of 2\%. Stage~1, trained on per-run failure rates, correctly flags that
+quiche will time out roughly one run in five at this loss rate. Stage~2,
+optimising composite score, still prefers quiche's throughput over TCP
+because it was trained at lower loss values where quiche is the better
+option. The prober surfaces both outputs separately and flags the conflict,
+leaving the decision to the operator.
+
+\subsection{Parameter sweeps}
+\label{subsec:sweeps}
+
+The static tests above cover fixed operating points. The sweep experiments
+show how behaviour changes continuously as a single parameter varies.
+Figure~\ref{fig:sweep-loss} shows the loss sweep: BW\,=\,100\,Mbps,
+RTT\,=\,50\,ms, profile\,=\,mobile\_lossy, loss from 0 to 10\%.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.75\textwidth]{src/img/eval/fig_sweep_loss.pdf}
+  \caption{Loss sweep (BW\,=\,100\,Mbps, RTT\,=\,50\,ms, profile\,=\,mobile\_lossy).
+           Top: recommendation confidence at each loss level. Hatched bars are
+           UNSTABLE. Bottom: Stage~1 timeout probability per implementation.
+           Dashed line is the 10\% elimination threshold.}
+  \label{fig:sweep-loss}
+\end{figure}
+
+At zero loss, quiche is recommended but at only 44.5\% confidence and marked
+UNSTABLE. Meanwhile, msquic is close behind and the two are nearly tied. At 2\% loss,
+msquic's timeout probability crosses 22.7\% and Stage~1 eliminates it. With
+msquic gone, quiche's confidence jumps to 80.6\% and the recommendation
+becomes STABLE. At 5\% and 10\% loss the confidence rises further to 96--97\%
+as the field narrows further. The stability gate does exactly what it should:
+low confidence when implementations are equivalent, high confidence once the
+field is pruned.
+
+Figure~\ref{fig:sweep-rtt} shows the RTT sweep: BW\,=\,500\,Mbps, no loss,
+profile\,=\,latency-sensitive, RTT from 10 to 300\,ms.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.75\textwidth]{src/img/eval/fig_sweep_rtt.pdf}
+  \caption{RTT sweep (BW\,=\,500\,Mbps, loss\,=\,0\%, profile\,=\,latency-sensitive).
+           Top: recommendation and confidence per RTT value. Hatched bars are
+           UNSTABLE. Bottom: Stage~1 timeout probability per implementation.}
+  \label{fig:sweep-rtt}
+\end{figure}
+
+At 10\,ms RTT, msquic wins with 71.5\% confidence and the result is STABLE.
+Above that, confidence drops and results become UNSTABLE, which means that this
+profile is in a region of high label ambiguity (quiche and TCP are close in
+the scoring) and three rounds of probing is not enough to resolve close calls.
+At 60\,ms and above, the recommendation shifts to TCP. At 300\,ms, mvfst's
+timeout probability reaches 73.7\% and Stage~1 eliminates it. The recommendation
+flip from msquic to TCP at high RTT is consistent with the bandwidth
+utilisation data in Section~\ref{sec:raw-perf}: msquic's performance
+degrades at high BDP while TCP maintains better utilisation, and the
+latency-sensitive profile's tail RTT weight amplifies this difference
+into a clear preference.

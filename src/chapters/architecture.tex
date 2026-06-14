@@ -1,4 +1,117 @@
 \chapter{Architecture}
 \label{sec:architecture}
 
-\radu{Cum ar trebui sa functioneze solutia ta. Big picture, nu intra in detalii. Pentru asta ai sectiunea de implementare. Include figuri (sugerez draw.io) in format .pdf (scaleaza cel mai bine), din directorul \texttt{figures}. Lasa asta mai spre final.}
+The system has three parts: a data collection environment, an offline
+training pipeline, and a live prober. Data collection and training run once
+(or whenever new data is needed) and produce static model files. The prober
+is what runs in production. Chapter~\ref{chapter:implementation} covers the
+source code and configuration details, this chapter describes how the parts
+fit together.
+
+% =============================================================================
+\section{System Overview}
+\label{sec:system-overview}
+
+Figure~\ref{fig:system-pipeline} shows the end-to-end flow.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/arch/fig_system_pipeline.pdf}
+  \caption{End-to-end system overview. Data collection produces a CSV dataset
+           that feeds offline training. The trained models are loaded by the
+           live prober, which measures network conditions and outputs a
+           recommendation.}
+  \label{fig:system-pipeline}
+\end{figure}
+
+The prober does not retrain or update anything at runtime. It loads the
+serialised forests from disk and runs inference in under a second. Everything
+computationally expensive happens offline.
+
+% =============================================================================
+\section{Test Topology}
+\label{subsec:topology}
+
+Data collection runs inside a three-container Docker Compose setup.
+Figure~\ref{fig:topology} shows the layout.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/arch/fig_topology.pdf}
+  \caption{Docker Compose test topology. The network simulator sits between
+           client and server and applies \texttt{tc netem} impairments on
+           both legs of the path.}
+  \label{fig:topology}
+\end{figure}
+
+The client lives on \texttt{client\_net} (172.28.0.0/24) and the server on
+\texttt{server\_net} (172.28.100.0/24). The simulator is attached to both:
+172.28.0.2 toward the client, 172.28.100.2 toward the server. Static routes
+are added at container startup so all traffic between client and server goes
+through the simulator. Neither side can reach the other directly.
+
+Impairments are configured with \texttt{tc netem} on the simulator's egress
+interfaces, meaning every packet in either direction crosses a netem qdisc.
+Bandwidth is shaped with \texttt{tc tbf} in series with netem. One run fixes
+all seven condition parameters for the duration of a single transfer, then
+the containers reset for the next condition.
+
+% =============================================================================
+\section{Recommender Pipeline}
+\label{subsec:recommender-pipeline}
+
+The recommender is a two-stage classification pipeline.
+Figure~\ref{fig:ml-pipeline} shows the structure.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{src/img/arch/fig_ml_pipeline.pdf}
+  \caption{Two-stage recommender pipeline. Stage~1 runs one binary
+           classifier per implementation to estimate timeout risk.
+           Those above the 10\% threshold are eliminated. Stage~2 runs
+           a profile-specific multiclass classifier over the survivors
+           and returns a ranked recommendation with a confidence score.}
+  \label{fig:ml-pipeline}
+\end{figure}
+
+Stage~1 has five binary Random Forests, one per implementation. Each takes
+the same 8-feature input and outputs a timeout probability. Implementations
+above the 10\% threshold are dropped and do not reach Stage~2. The threshold
+is configurable at inference time.
+
+Stage~2 has five multiclass Random Forests, one per profile. Only the one
+matching the operator's selected profile runs. It takes the same input and
+outputs a probability distribution over the surviving implementations. The
+highest-probability class is the recommendation: that probability is the
+confidence. If confidence is below 60\%, the result is flagged UNSTABLE,
+meaning two or more implementations are too close to separate reliably from
+the available measurements.
+
+The two stages are trained independently. Stage~1 uses binary timeout labels
+from raw run data. Stage~2 uses composite profile scores computed from
+per-condition averaged metrics. Both use 5-fold GroupKFold cross-validation
+at the condition level to prevent leakage between repetitions of the same
+condition.
+
+% =============================================================================
+\section{Prober Deployment}
+\label{sec:prober}
+
+The prober is the production-facing part of the system. It runs on the
+client, coordinates a short burst of test transfers with a counterpart on
+the server, measures the resulting conditions, and runs both pipeline stages.
+
+There are two deployment modes. In cooperative mode, a lightweight
+\texttt{probe\_server.py} process runs on the server side. The prober sends
+several measurement rounds (default: 3), receives per-implementation
+throughput and timing samples, averages across rounds, and feeds the result
+to the classifiers. This is the mode used in all experiments in this thesis.
+
+In passive mode, no server-side process is needed. The prober estimates
+bandwidth with a short iperf3 burst and measures RTT with ICMP pings against
+any reachable endpoint. Passive mode is less accurate, especially for loss
+and corruption, but works against existing services without any coordination.
+
+The output is the same in both modes: Stage~1 timeout probabilities per
+implementation (with eliminated ones marked), the Stage~2 recommendation for
+the chosen profile, a confidence percentage, and a STABLE/UNSTABLE flag.

@@ -1,4 +1,569 @@
 \chapter{Implementation}
 \label{chapter:implementation}
 
-\radu{Detalii tehnice de implementare. Asta este sectiunea cea mai usor de scris. Daca nu te incadrezi in limita de spatiu, de aici cauti sa tai prima oara.}
+\section{Initial Approach: quic-interop-runner}
+\label{sec:impl-interop-runner}
+
+Initially, we opted to use the QUIC Interop Runner~\cite{quic-interop-runner},
+an open-source framework maintained by the QUIC working group for testing
+interoperability between QUIC implementations. Each implementation provides a
+standardised Docker image exposing a common interface. Meanwhile, the runner orchestrates
+client-server pairs through a set of predefined test scenarios executed inside a
+network simulator container.
+
+This framework was chosen because it already included Docker images for
+several relevant implementations and an integrated network simulation layer,
+which appeared to reduce the setup effort for a benchmarking study. However,
+two fundamental problems emerged during adaptation.
+
+\subsection{Fixed file transfer model}
+\label{subsec:file-transfer-model}
+
+The official runner images are built around a \textit{file transfer} paradigm:
+the client requests a file of a fixed size (e.g.\ 10\,MB) and the test ends
+when the transfer completes. For interoperability checks, this approach works fine,
+but it breaks down for performance benchmarking on high-bandwidth links. At
+10\,Gbps, saturating the link for even five seconds requires transferring
+approximately 6.25\,GB of data. Extending this to the range of bandwidths
+tested in this paper would have required generating and transferring tens to
+hundreds of gigabytes per test run, making the evaluation of a big number of
+parameter combinations completely impractical.
+
+To address this, we built a set of custom \textit{continuous-streaming}
+implementations under \texttt{quic-continuous-implementations/}.
+These servers and clients stream data indefinitely for a fixed wall-clock duration,
+operating the same way as \texttt{iperf3} does for TCP. A TCP baseline was added alongside
+them. We also extended the runner with batch testing infrastructure\
+(\texttt{run\_measurements.py}) to go through network condition combinations
+automatically.
+
+\subsection{Prohibitive run times and suspicious results}
+\label{subsec:interop-problems}
+
+After integrating the continuous implementations and enabling network condition
+injection through the runner's ns3-based simulator, two critical problems made
+the approach unviable.
+
+\textbf{Run time.} A single scenario (one implementation pair under one network
+condition) took between 31 and 62 minutes to complete (measured: TCP 59\,min,
+quic-go 50\,min, quiche 46\,min, msquic 31\,min, ngtcp2/nginx 62\,min).
+The overhead originated from the ns3 simulation layer, which processes every
+packet through a software simulation stack rather than passing it directly to
+the OS network stack. In other words, going through a modest condition grid of a
+few hundred combinations would have taken weeks of continuous execution.
+
+\textbf{Suspicious results.} Beyond the run time, the measured performance
+figures were clearly artifacts of the simulation layer rather than
+representative of real network and protocol behaviour. As a concrete example, quic-go
+transferred a 10\,MB file over a nominal 10\,Mbps link in 57,962\,ms, nearly
+eight times longer than the theoretical minimum of approximately 8\,seconds.
+ngtcp2 paired with nginx took 76,688\,ms for the same transfer, an order of
+magnitude above the expected duration. These discrepancies were consistent
+across runs and across implementations, showing ns3 overhead rather than real
+implementation behaviour.
+
+Given these two constraints, the quic-interop-runner approach was abandoned in
+favour of a custom testing framework that applies network conditions directly
+at the OS level, described in the following section.
+
+% =============================================================================
+\section{Custom Testing Framework}
+\label{sec:custom-runner}
+
+The custom runner replaces the ns3-based simulation layer with a lightweight
+three-container Docker topology. Network impairments are applied
+directly by the Linux kernel via \texttt{tc/netem}, which eliminates the
+per-packet simulation overhead and produces measurements that reflect
+QUIC stack behaviour on Linux.
+
+\subsection{Container topology}
+\label{subsec:topology}
+
+Each test run instantiates three containers from a single
+\texttt{docker-compose.yml}: \texttt{server}, \texttt{sim}, and
+\texttt{client}. The server and client containers each belong to a dedicated
+Docker bridge network, \texttt{server\_net} (172.28.100.0/24) and
+\texttt{client\_net} (172.28.0.0/24) respectively. The simulator container is
+connected to both networks simultaneously and acts as the only forwarding path
+between the two endpoints.
+
+Static IP addresses are assigned at container startup: the server receives
+172.28.100.100, the client receives 172.28.0.100, and the simulator occupies
+172.28.100.2 on the server side and 172.28.0.2 on the client side. Each
+endpoint container adds a static route at startup so that traffic destined for
+the remote subnet is directed through the simulator.
+
+The implementation that needs to be tested is selected at compose time via
+the \texttt{IMPL} environment variable (\texttt{quiche}, \texttt{quic-go},
+\texttt{msquic}, \texttt{mvfst}, or \texttt{tcp}), which causes the appropriate
+server and client Dockerfiles to be used while the simulator image remains fixed.
+
+\subsection{Network condition injection}
+\label{subsec:netem}
+
+All network impairments are applied inside the simulator container using a
+two-layer \texttt{tc} configuration. An HTB (Hierarchical Token Bucket) qdisc
+enforces the configured bandwidth ceiling. Meanwhile, a \texttt{netem} qdisc attached as
+a child leaf introduces delay, jitter, packet loss, and bit corruption.
+This configuration is applied independently to both egress interfaces of the
+simulator (\texttt{eth0} facing the client network and \texttt{eth1} facing the
+server network), so that impairments affect traffic in both directions.
+
+Because of this, a one-way packet traverses exactly one netem stage, giving
+a one-way delay equal to \texttt{DELAY}, making the round-trip time equal to
+\texttt{2 x DELAY}. Thus, all condition parameters in the dataset are expressed in terms
+of RTT, with the netem \texttt{DELAY} value set to \texttt{RTT / 2} accordingly.
+
+Competing background traffic is optionally generated by an \texttt{iperf3}
+process inside the simulator container, directed at a dedicated
+\texttt{iperf3-target} container on the client network. This traffic, in turn, traverses
+the same netem qdisc as the application under test, approximating cross-traffic
+contention on a shared bottleneck link.
+
+\subsection{Condition grid}
+\label{subsec:condition-grid}
+
+The parameters are defined in \texttt{matrix\_config.sh} and vary across
+five independent dimensions:
+
+\begin{itemize}
+    \item \textbf{Bandwidth / RTT}: 18 paired combinations covering realistic
+          link types from 50\,Mbit/s mobile (30--80\,ms RTT) through 5\,Gbit/s
+          datacenter (10--150\,ms RTT), including high-BDP scenarios where the
+          bandwidth-delay product exceeds the 16\,MB default flow-control
+          window of msquic under default configuration.
+    \item \textbf{Packet loss}: 0\%, 0.1\%, 0.5\%, 1\%, 2\%.
+    \item \textbf{Jitter}: 0, 2, 5, 10\,ms (uniform random, applied per packet).
+    \item \textbf{Corruption}: 0\%, 0.05\%, 0.1\%, 0.5\%.
+    \item \textbf{Competing traffic}: none, TCP at 40\% of link bandwidth,
+          UDP at 40\% of link bandwidth.
+\end{itemize}
+
+The Cartesian product of these parameter sets yields 4,320 unique network condition combinations.
+Each combination is repeated 10 times per implementation to average out
+congestion-control variability, resulting in 43,200 runs per implementation
+and 216,000 total runs across the five implementations. Each run transfers data
+continuously for 30 seconds.
+
+\subsection{Execution environment and scale}
+\label{subsec:execution}
+
+Initial development and validation were performed on WSL2. In practice,
+WSL2's partial kernel support caused recurring failures: certain kernel
+modules required by the implementations under test~\cite{cloudflare-quiche}
+could not be loaded, and network namespace operations became unreliable at
+high bandwidths. Therefore, testing was migrated to a native Linux environment,
+where all kernel features were available.
+
+The full dataset was collected on the faculty computing cluster over
+approximately 12 days. Sixteen virtual machines were provisioned on an
+OpenStack deployment, each with the \texttt{c.medium} flavour: 4 vCPUs,
+4\,GB of RAM, and a 25\,GB root volume. An additional 25\,GB block volume
+was attached to each instance to avoid running out of disk space due to packet
+captures. During development, unfiltered pcap files occasionally grew
+very large, so the extra storage was added as a precaution. After
+tightening the capture filters and scoping the scenarios, disk usage
+remained modest and the additional volumes were ultimately unnecessary,
+though they were kept in place.
+
+The 43,200 runs per implementation were distributed across the 16 machines
+using a deterministic sharding scheme (\texttt{--shard K --of 16}).
+Each machine processed an independent, non-overlapping subset of the
+configuration matrix, and results were consolidated after the runs completed.
+
+% =============================================================================
+\section{Dataset Construction}
+\label{sec:dataset}
+
+Each completed run produces a result record containing the network condition
+parameters that were configured, the implementation that was tested, and a set
+of measured performance metrics. These raw records are aggregated and labelled
+by \texttt{train.py} before being used for model training.
+
+\subsection{Measured metrics}
+\label{subsec:metrics}
+
+The following performance metrics are recorded per run:
+
+\begin{itemize}
+    \item \textbf{goodput\_mbps}: application-layer throughput, excluding
+          QUIC and transport headers.
+    \item \textbf{overhead\_pct}: ratio of protocol overhead to total bytes
+          on the wire, expressed as a percentage.
+    \item \textbf{hs\_ms}: handshake duration in milliseconds, measured
+          from the first Initial packet to the completion of the handshake.
+    \item \textbf{retrans\_pct}: percentage of packets retransmitted.
+    \item \textbf{recovery\_s}: time in seconds until throughput recovers
+          after a loss event.
+    \item \textbf{tail\_rtt\_ms}: 99th-percentile round-trip time observed
+          during the transfer.
+    \item \textbf{srv\_cpu\_mean\_pct}, \textbf{cli\_cpu\_mean\_pct}: mean
+          CPU usage on the server and client respectively.
+    \item \textbf{srv\_mem\_mean\_mib}, \textbf{cli\_mem\_mean\_mib}: mean
+          memory usage on the server and client respectively.
+\end{itemize}
+
+Runs where the transfer does not complete within the 30-second measurement window
+(due to a failed handshake, mid-transfer stall or timeout) are
+flagged as \texttt{timed\_out}. These rows are retained in the dataset for
+Stage~1 (timeout classifier training) but excluded from Stage~2 label
+assignment, since a timed-out run produces no meaningful performance metrics.
+
+A data quality filter removes mvfst rows where the measured handshake time
+exceeds 10,000\,ms. These represent occasional fake outliers in which
+mvfst entered an unusually long retry cycle, producing a handshake time
+several orders of magnitude above its normal range. Replacing them with NaN
+would propagate into the per-condition averages and distort the scoring.
+Dropping them entirely is the safer choice.
+
+\subsection{Deployment profiles and composite scoring}
+\label{subsec:profiles}
+
+Rather than training a single model that predicts a globally best
+implementation, the recommender is built around a generic scoring mechanism:
+any deployment scenario can be expressed as a named set of (metric, direction,
+weight) triples and a separate Stage~2 classifier is trained for each set
+of this kind. For each profile, a scalar composite score is computed per
+(condition, implementation) pair as a weighted sum of normalised metrics and
+the implementation with the highest score within a condition becomes the
+training label for that profile.
+
+This design means that adding a new profile requires only defining its weight
+vector in \texttt{train.py} and rerunning Stage~2 training. The rest of the
+pipeline (normalisation, label assignment, cross-validation, model serialisation)
+is driven by the same loop and requires no further changes.
+
+Five profiles were defined as examples of realistic deployment scenarios:
+
+\begin{itemize}
+    \item \textbf{Datacenter}: maximise throughput above all else.
+          Goodput carries a weight of 0.80, thus penalties are small for
+          overhead, retransmissions, tail latency, and server CPU.
+    \item \textbf{Lightweight}: optimise for resource efficiency on
+          constrained hardware. CPU and memory weights together account for
+          0.55 of the score, while goodput is weighted at only 0.25.
+    \item \textbf{Mobile lossy}: prioritise resilience to packet loss.
+          Retransmission rate (0.25) and loss recovery time (0.15) dominate
+          alongside goodput (0.40).
+    \item \textbf{Latency sensitive}: minimise perceived delay. Tail RTT
+          (0.30) and handshake time (0.20) are weighted heavily alongside
+          goodput (0.30).
+    \item \textbf{Deep space}: optimise for extreme-RTT, high-loss links.
+          Retransmission rate (0.25), recovery time (0.15), and tail RTT (0.15)
+          together outweigh goodput (0.30), with additional penalties for
+          overhead and handshake time.
+\end{itemize}
+
+An operator with different priorities, a video streaming service that
+cares primarily about tail latency at moderate loss rates for example,
+could define a custom profile with appropriate weights and obtain a tailored
+classifier from the same dataset without re-running any experiments.
+
+\subsection{Per-condition normalisation}
+\label{subsec:normalisation}
+
+A critical design decision is that metric normalisation is performed
+\textit{within each condition} rather than globally. For each network
+condition, each metric is scaled to $[0, 1]$ relative to the minimum and
+maximum values observed across the five implementations under that exact
+condition. This means the composite score reflects how much better an
+implementation performs relative to the best and worst alternatives available
+in the same environment.
+
+Global normalisation would be incorrect here: TCP achieves approximately
+4,000\,Mbps goodput in the highest-bandwidth datacenter conditions, which would
+compress all other conditions into a narrow band near zero after global scaling.
+Under global normalisation, the 0.05-weight overhead penalty would then
+numerically dominate the 0.80-weight goodput term for most conditions, producing
+winners driven by overhead rather than throughput.
+
+\subsection{Derived feature: fc\_limited}
+\label{subsec:fc-limited}
+
+A binary feature \texttt{fc\_limited} is derived from the bandwidth and RTT
+values of each condition. msquic~v2.3.5 defaults its connection-level flow
+control window to 16\,MB~\cite{microsoft-msquic}, defined in
+\texttt{src/core/quicdef.h} (line~233) as:
+
+\begin{verbatim}
+#define QUIC_DEFAULT_CONN_FLOW_CONTROL_WINDOW   0x1000000  // 16MB
+\end{verbatim}
+
+While this value is configurable at runtime via the \texttt{QUIC\_SETTINGS}
+API, our test setup uses the default configuration throughout, reflecting the
+experience of a developer deploying msquic without specialised tuning.
+When the BDP approaches or exceeds this window, msquic can no longer keep the
+pipe full and timeout rates rise sharply. Inspecting the dataset confirms
+this: msquic times out in 32.3\% of conditions where \texttt{fc\_limited=1},
+compared to 6.7\% elsewhere. The threshold is set at 32\,MB, twice the
+default window, as a conservative empirical boundary that captures the
+onset of the degradation regime:
+
+\[
+    \texttt{fc\_limited} = \left[ \frac{\texttt{bandwidth\_mbps} \times
+    \texttt{rtt\_ms}}{8000} > 32 \right]
+\]
+
+Including \texttt{fc\_limited} explicitly gives the Random Forest a concrete
+tell for this circumstance rather than requiring it to discover the threshold
+implicitly from the continuous bandwidth and RTT features alone.
+
+% =============================================================================
+\section{Training Pipeline}
+\label{sec:training}
+
+Model training is implemented in \texttt{train.py} as a two-stage pipeline.
+Stage~1 identifies implementations that are likely to time out under the given
+conditions and eliminates them from consideration. Stage~2 ranks the surviving
+implementations according to the deployment profile. Training both stages from
+the same dataset means the two classifiers share a consistent view of what
+"good" and "bad" conditions look like.
+
+\subsection{Cross-validation strategy}
+\label{subsec:cv}
+
+All models are evaluated with 5-fold GroupKFold cross-validation, where the
+grouping key is the condition identifier, a unique integer assigned to each
+distinct (bandwidth, RTT, loss, jitter, corruption, competing) tuple. This
+ensures that all 10 repetitions of a given condition are placed in the same
+fold and never split across training and test sets.
+
+Without this constraint, repetitions of the same condition would appear on
+both sides of a fold boundary. Because repetitions differ only in random
+CUBIC cycle variation rather than in any predictable pattern, a model evaluated
+this way would appear more accurate than it truly is: it would effectively
+be tested on conditions it has already seen in training.
+
+\subsection{Stage 1: timeout classifiers}
+\label{subsec:stage1}
+
+Five binary classifiers are trained, one per implementation. Each classifier
+receives the eight network features and predicts whether a run under those
+conditions will time out. The Random Forest is configured as follows:
+
+\begin{verbatim}
+RandomForestClassifier(
+    n_estimators=300,
+    max_features='sqrt',
+    min_samples_leaf=5,
+    class_weight='balanced',
+    oob_score=True,
+)
+\end{verbatim}
+
+The \texttt{class\_weight='balanced'} setting is necessary because timeouts
+are rare for most implementations: only msquic produces a meaningful number
+of timed-out rows (5,363 out of 43,200), while quic-go has zero. Without
+balancing, a classifier that always predicts "no timeout" would achieve
+over 99\% accuracy while being useless for the task. Balanced weighting
+up-samples the minority class. This prevents timeouts from being ignored
+during training where they would otherwise be overwhelmed by non-timeout
+samples.
+
+At inference time, Stage~1 computes a timeout probability for each
+implementation. Any implementation whose probability exceeds a configurable
+threshold (default 10\%) is eliminated before Stage~2 runs. If all
+implementations are eliminated, which can occur at extreme conditions,
+the one with the lowest timeout probability is kept as a fallback.
+
+\subsection{Stage 2: profile classifiers}
+\label{subsec:stage2}
+
+Five multiclass classifiers are trained, one per deployment profile. Each
+classifier is trained on the averaged, per-condition normalised dataset
+described in Section~\ref{sec:dataset}: one row per (condition, implementation)
+pair, labelled with the winner under that profile's composite score. The
+configuration is:
+
+\begin{verbatim}
+RandomForestClassifier(
+    n_estimators=300,
+    max_features='sqrt',
+    min_samples_leaf=3,
+    class_weight='balanced',
+    oob_score=True,
+)
+\end{verbatim}
+
+The lower \texttt{min\_samples\_leaf} relative to Stage~1 (3 vs.\ 5) allows
+the Stage~2 trees to capture finer-grained distinctions between closely ranked
+implementations, at the cost of slightly higher variance. This trade-off is
+appropriate here because Stage~2 labels are already averaged over repetitions
+and are therefore less noisy than the raw per-run Stage~1 labels.
+
+\subsection{Feature importance}
+\label{subsec:feature-importance}
+
+Two complementary importance measures are computed for each Stage~2 model.
+Mean Decrease in Impurity (MDI) is read directly from the final fitted model
+and reflects how much each feature reduces Gini impurity across all trees.
+Permutation importance is computed on the last cross-validation fold's held-out
+set: features are shuffled one at a time and the resulting accuracy drop is
+recorded. Because permutation importance is measured on data the model has
+never seen during training, it gives a less optimistic estimate of each
+feature's true contribution than MDI alone.
+
+Both measures are saved to \texttt{results/feature\_importance.csv} alongside
+the cross-validation accuracy and out-of-bag scores for each profile.
+
+% =============================================================================
+\section{Inference Module}
+\label{sec:inference}
+
+The trained models are exposed through \texttt{infer.py}, which can be used
+both as a Python library and as a standalone command-line tool. The public
+entry point is a single \texttt{recommend()} function that accepts a
+dictionary of network condition values and a profile name, runs both stages
+of the pipeline, and returns a structured result.
+
+\subsection{Inference flow}
+\label{subsec:inference-flow}
+
+Given a set of network conditions, inference proceeds as follows:
+
+\textbf{Pre-processing.} If \texttt{fc\_limited} is absent from the input,
+it is computed automatically from bandwidth and RTT using the same formula
+used during training (Section~\ref{subsec:fc-limited}). This means a caller
+only needs to supply the seven directly observable features, while the derived
+feature is handled transparently.
+
+\textbf{Stage 1.} Each of the five per-implementation timeout classifiers
+is queried. For each, \texttt{predict\_proba} returns the probability of
+a timeout. Implementations whose probability exceeds the elimination
+threshold (default 10\%) are marked as eliminated. If all implementations
+are eliminated, the one with the lowest timeout probability is kept as a
+fallback to ensure a recommendation is always produced.
+
+\textbf{Stage 2.} The profile classifier for the requested deployment profile
+is queried with the same feature vector. It returns a probability for each
+implementation. Probabilities belonging to eliminated implementations are
+discarded, and the remaining values are renormalised to sum to 1. The
+implementation with the highest renormalised probability is returned as
+the top recommendation.
+
+The renormalisation step is required because otherwise the confidence reported
+to the user would be lessened by the probability mass of removed implementations,
+making strong recommendations appear weaker than they truly are.
+
+\subsection{Model caching and library interface}
+\label{subsec:model-caching}
+
+Each \texttt{.pkl} model file is loaded with \texttt{joblib.load} on first
+use and stored in a module-level dictionary. Subsequent calls to
+\texttt{recommend()} with any profile or implementation reuse the cached
+objects, so the I/O cost of deserialising ten model files is paid only once
+per process lifetime. This matters in the network prober, which calls
+\texttt{recommend()} multiple times per round across multiple rounds.
+
+The function returns a dictionary containing the full ranked list with
+renormalised probabilities, the top implementation, the confidence value,
+the list of eliminated implementations, the raw per-implementation timeout
+probabilities, and a flag warning when \texttt{fc\_limited=1} and msquic
+has not been eliminated (a condition where msquic is at elevated timeout
+risk even if its Stage~1 probability falls just below the threshold).
+
+% =============================================================================
+\section{Network Prober}
+\label{sec:prober}
+
+The network prober closes the loop between measurement and recommendation.
+It consists of two components: \texttt{probe\_server.py}, a lightweight
+daemon deployed on the remote host, and \texttt{prober.py}, the client-side
+tool that measures network conditions and calls \texttt{recommend()}.
+
+\subsection{Cooperative and passive modes}
+\label{subsec:probe-modes}
+
+The prober supports two operating modes depending on whether
+\texttt{probe\_server.py} is running on the target host.
+
+\textbf{Cooperative mode} is enabled by passing \texttt{--server-port}.
+The prober runs three measurements in sequence: ping for RTT, loss, and
+jitter respectively, a UDP iperf3 test for bandwidth and competing traffic
+and a UDP CRC32 burst for corruption. The sequencing is deliberate: ping
+runs first because it has no side effects, iperf3 runs second because it
+generates significant traffic that would inflate the competing-traffic
+estimate if measured concurrently, and the corruption burst runs last
+because it requires the probe server.
+
+\textbf{Passive mode} is used when no probe server is available. Ping is
+still run for RTT, loss, and jitter, and competing traffic is estimated
+from a one-second NIC counter window via \texttt{psutil}. Bandwidth cannot
+be measured passively and must be supplied by the operator via
+\texttt{--bw}. Corruption defaults to zero. This mode is appropriate when
+the target host is not under the operator's control.
+
+\subsection{Bandwidth measurement}
+\label{subsec:bw-measurement}
+
+Bandwidth is measured using iperf3 in UDP mode (\texttt{-u -b 10G}).
+The sender pushes at 10\,Gbit/s, the link rate is the bottleneck. The
+received bandwidth is derived from the sender rate and the loss fraction
+reported by the iperf3 receiver:
+
+\[
+    \texttt{bandwidth\_mbps} = \frac{\texttt{bits\_per\_second} \times
+    (1 - \texttt{lost\_percent} / 100)}{10^6}
+\]
+
+TCP iperf3 was considered but rejected: TCP goodput collapses under loss
+because congestion control interprets loss as a congestion signal and
+reduces the sending rate. This would cause the prober to report the
+achieved throughput rather than the link capacity, which is the feature
+the model was trained on.
+
+Competing traffic is derived from the same iperf3 window: the NIC byte
+counters are sampled before and after the iperf3 test, and any traffic
+beyond what iperf3 itself sent is attributed to background load.
+
+\subsection{Corruption measurement}
+\label{subsec:corruption-measurement}
+
+\texttt{probe\_server.py} runs a UDP echo server on a configurable port.
+Each probe packet carries a 4-byte sequence number, a 1000-byte payload
+of known content, and a 4-byte CRC32 checksum of the payload. The server
+verifies the checksum and replies with the sequence number and a boolean
+indicating whether corruption was detected.
+
+The prober sends all 1,000 probe packets in a burst first, then collects
+replies until a deadline. Sending and receiving are decoupled so that the
+total probe time is bounded by one round-trip worth of latency rather than
+scaling with the number of packets. Early exit is applied when all replies
+have been received, otherwise collection continues until the deadline,
+since gaps between replies are normal on congested links.
+
+At 1,000 packets, the probe reliably detects corruption rates down to
+approximately 0.1\% (1 expected corrupted packet). Lower rates require
+more packets to detect with statistical confidence.
+
+\subsection{Stability averaging}
+\label{subsec:stability}
+
+A single probe round can be misleading on a variable link. The prober
+runs $N$ rounds (default 3) and averages the \texttt{recommend()} output
+across rounds. Probabilities from each round's ranking are averaged and
+renormalised, timeout probabilities are averaged independently and
+eliminated implementations are re-derived from the averaged timeout
+probabilities. This ensures that an implementation eliminated in most
+rounds but not the last still appears eliminated in the final output.
+
+The confidence of the averaged recommendation is compared against a
+stability threshold (default 60\%). If confidence falls below this value,
+the output notes that the top two implementations are sufficiently close
+that either would be a reasonable choice, and suggests running more rounds.
+
+\subsection{StableRecommender: hysteresis for autonomous deployment}
+\label{subsec:stable-recommender}
+
+For scenarios where the prober runs continuously and drives automatic
+re-deployment, a \texttt{StableRecommender} class provides a hysteresis
+gate. It tracks a candidate challenger to the currently deployed
+implementation and only triggers a switch when the challenger has been
+top-ranked for a configurable number of consecutive rounds (default 3)
+\textit{and} its probability gap over the current implementation exceeds
+a minimum margin (default 0.15). This prevents thrashing between
+near-equivalent implementations on noisy links, where small fluctuations
+in measured conditions would otherwise cause unnecessary redeployments.
+The class is not wired to the CLI and is not exercised in the evaluation,
+yet it is included as a proof-of-concept interface for future autonomous
+deployment scenarios.
