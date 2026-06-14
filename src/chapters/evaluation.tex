@@ -21,10 +21,10 @@ traffic streams (none or 40\% of link rate for TCP and UDP independently).
 Each combination was repeated 10 times to average out measurement noise.
 
 One derived binary feature, \texttt{fc\_limited}, marks conditions where the
-bandwidth-delay product exceeds 32\,MB, twice msquic's 16\,MB default
-flow-control window. The threshold is set at twice the window as a
-conservative empirical boundary that captures the onset of the degradation
-regime:
+bandwidth-delay product exceeds 32\,MB, the initial per-stream receive window
+configured for msquic. Past this point msquic's timeout rate rises sharply
+(Section~\ref{subsec:fc-limited}), so the feature captures the onset of its
+degradation regime:
 \[
   \texttt{fc\_limited} = \mathbf{1}\!\left[
     \frac{\text{bandwidth\_mbps} \times \text{rtt\_ms}}{8000} > 32
@@ -131,8 +131,8 @@ winner per cell under three conditions side by side.
 
 In clean traffic, TCP and msquic win most of the grid. Introduce 2\% loss
 and quiche takes over a large portion while msquic retreats due to its
-higher timeout risk. At 10\,ms jitter the shift is subtler. The winner is
-not fixed: it depends on conditions, and that is the core motivation for
+higher timeout risk. At 10\,ms jitter the shift is subtler. \emph{The winner is
+not fixed}: it depends on conditions, and that is the core motivation for
 building a recommender.
 
 One more raw metric before moving to the model: timeout rates. msquic times
@@ -319,7 +319,7 @@ reports the results.
 \end{table}
 
 quic-go and TCP are trivial cases: with zero and one timeout across 43,200
-runs respectively, predicting ``no timeout'' for every row achieves
+runs respectively, predicting "no timeout" for every row achieves
 near-perfect accuracy by definition. The real results are quiche (99.49\%)
 and msquic (85.67\%). For msquic, the 85.67\% reflects a genuinely noisy
 decision boundary: even within the \texttt{fc\_limited} regime, some
@@ -400,7 +400,7 @@ effectively tied, and the label is essentially noise.
 For latency-sensitive, 23.5\% of conditions are ambiguous (median gap 0.111,
 the lowest in the table). A perfect classifier on the unambiguous subset would
 reach at most roughly 76.5\% and the observed 67.80\% is close to that ceiling.
-Label ambiguity, not model weakness, is the dominant cause.
+\emph{Label ambiguity, not model weakness}, is the dominant cause.
 
 Datacenter is the opposite case: a median gap of 0.507 means quiche
 outscores the alternatives by a large margin in most conditions, and 94.38\%

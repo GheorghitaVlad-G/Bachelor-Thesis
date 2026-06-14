@@ -13,9 +13,9 @@
 @misc{microsoft-msquic,
   author       = {Microsoft},
   title        = {{MsQUIC}: Cross-platform, open-source implementation of the {QUIC} protocol},
-  howpublished = {\url{https://github.com/microsoft/msquic/blob/v2.3.5/src/core/quicdef.h\#L233}},
-  year         = {2019},
-  note         = {Version 2.3.5, \texttt{src/core/quicdef.h} line 233. Accessed: June 2026}
+  howpublished = {\url{https://github.com/microsoft/msquic/blob/v2.4.4/src/core/quicdef.h}},
+  year         = {2024},
+  note         = {Version 2.4.4, \texttt{src/core/quicdef.h} (flow-control window defaults). Accessed: June 2026}
 }
 
 @misc{cloudflare-quiche-gso,
@@ -241,12 +241,100 @@
   doi       = {10.1002/widm.1301}
 }
 
-% https://www.sciencedirect.com/science/article/pii/S014036642400166X
-% https://www.researchgate.net/publication/332027418_Modified_QUIC_protocol_for_improved_network_performance_and_comparison_with_QUIC_and_TCP
-% https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=10186365&tag=1  (QUIC, unidentified)
-% https://www.mdpi.com/1099-4300/25/2/294  (PBQ-Enhanced QUIC, DRL congestion control, Entropy 2023)
-% https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=9646248  (Evaluating QUIC over Web/Cloud/Video Workloads)
-% https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=9500675  (Benchmarking HTTP/QUIC in IoT Cloud/Edge Continuum)
-% https://cs.brown.edu/people/tab/papers/QUIC_WWW21.pdf  (Dissecting Performance of Production QUIC, Yu & Benson, WWW '21)
-% https://www.netlab.tkk.fi/~jo/papers/epiq21-rtp-over-quic.pdf  (Congestion Control for Real-time Media over QUIC, Engelbart & Ott, EPIQ '21)
-% https://ietresearch.onlinelibrary.wiley.com/doi/pdf/10.1049/cmu2.12154  (Modified QUIC protocol with congestion control, Kharat et al., IET Comm. 2021)
+% ---- Related Work sources (verified June 2026) ----
+
+@inproceedings{jaeger2023quic,
+  author    = {Jaeger, Benedikt and Zirngibl, Johannes and Kempf, Marcel and
+               Ploch, Kevin and Carle, Georg},
+  title     = {{QUIC} on the Highway: Evaluating Performance on High-rate Links},
+  booktitle = {Proceedings of the IFIP Networking Conference (IFIP Networking)},
+  year      = {2023},
+  publisher = {IEEE},
+  doi       = {10.23919/IFIPNetworking57963.2023.10186365}
+}
+
+@inproceedings{yu2021dissecting,
+  author    = {Yu, Alexander and Benson, Theophilus A.},
+  title     = {Dissecting Performance of Production {QUIC}},
+  booktitle = {Proceedings of the Web Conference 2021 (WWW '21)},
+  pages     = {1157--1168},
+  year      = {2021},
+  publisher = {ACM},
+  doi       = {10.1145/3442381.3450103}
+}
+
+@article{shreedhar2022evaluating,
+  author    = {Shreedhar, Tanya and Panda, Rohit and Podanev, Sergey and
+               Bajpai, Vaibhav},
+  title     = {Evaluating {QUIC} Performance Over Web, Cloud Storage, and
+               Video Workloads},
+  journal   = {IEEE Transactions on Network and Service Management},
+  volume    = {19},
+  number    = {2},
+  pages     = {1366--1381},
+  year      = {2022},
+  publisher = {IEEE},
+  doi       = {10.1109/TNSM.2021.3134562}
+}
+
+@inproceedings{dizdarevic2021benchmarking,
+  author    = {Dizdarevi\'{c}, Jasenka and Jukan, Admela},
+  title     = {Experimental Benchmarking of {HTTP/QUIC} Protocol in {IoT}
+               Cloud/Edge Continuum},
+  booktitle = {Proceedings of the IEEE International Conference on
+               Communications (ICC)},
+  year      = {2021},
+  publisher = {IEEE},
+  doi       = {10.1109/ICC42927.2021.9500675}
+}
+
+@inproceedings{engelbart2021rtp,
+  author    = {Engelbart, Mathis and Ott, J\"{o}rg},
+  title     = {Congestion Control for Real-time Media over {QUIC}},
+  booktitle = {Proceedings of the 2021 Workshop on the Evolution, Performance
+               and Interoperability of QUIC (EPIQ '21)},
+  pages     = {1--7},
+  year      = {2021},
+  publisher = {ACM},
+  doi       = {10.1145/3488660.3493801}
+}
+
+@article{kharat2019modquic,
+  author    = {Kharat, Prashant and Kulkarni, Muralidhar},
+  title     = {Modified {QUIC} Protocol for Improved Network Performance and
+               Comparison with {QUIC} and {TCP}},
+  journal   = {International Journal of Internet Protocol Technology},
+  volume    = {12},
+  number    = {1},
+  pages     = {35--43},
+  year      = {2019},
+  publisher = {Inderscience},
+  doi       = {10.1504/IJIPT.2019.098489}
+}
+
+@article{kharat2021modquic,
+  author    = {Kharat, Prashant and Kulkarni, Muralidhar},
+  title     = {Modified {QUIC} Protocol with Congestion Control for Improved
+               Network Performance},
+  journal   = {IET Communications},
+  volume    = {15},
+  number    = {9},
+  pages     = {1210--1222},
+  year      = {2021},
+  publisher = {Wiley},
+  doi       = {10.1049/cmu2.12154}
+}
+
+@article{zhang2023pbq,
+  author    = {Zhang, Zhifei and Li, Shuo and Ge, Yiyang and Xiong, Ge and
+               Zhang, Yu and Xiong, Ke},
+  title     = {{PBQ}-Enhanced {QUIC}: {QUIC} with Deep Reinforcement Learning
+               Congestion Control Mechanism},
+  journal   = {Entropy},
+  volume    = {25},
+  number    = {2},
+  pages     = {294},
+  year      = {2023},
+  publisher = {MDPI},
+  doi       = {10.3390/e25020294}
+}

@@ -101,13 +101,13 @@ The prober is the production-facing part of the system. It runs on the
 client, coordinates a short burst of test transfers with a counterpart on
 the server, measures the resulting conditions, and runs both pipeline stages.
 
-There are two deployment modes. In cooperative mode, a lightweight
+There are two deployment modes. In \textbf{cooperative mode}, a lightweight
 \texttt{probe\_server.py} process runs on the server side. The prober sends
 several measurement rounds (default: 3), receives per-implementation
 throughput and timing samples, averages across rounds, and feeds the result
 to the classifiers. This is the mode used in all experiments in this thesis.
 
-In passive mode, no server-side process is needed. The prober estimates
+In \textbf{passive mode}, no server-side process is needed. The prober estimates
 bandwidth with a short iperf3 burst and measures RTT with ICMP pings against
 any reachable endpoint. Passive mode is less accurate, especially for loss
 and corruption, but works against existing services without any coordination.

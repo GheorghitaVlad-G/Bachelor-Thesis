@@ -130,8 +130,8 @@ five independent dimensions:
     \item \textbf{Bandwidth / RTT}: 18 paired combinations covering realistic
           link types from 50\,Mbit/s mobile (30--80\,ms RTT) through 5\,Gbit/s
           datacenter (10--150\,ms RTT), including high-BDP scenarios where the
-          bandwidth-delay product exceeds the 16\,MB default flow-control
-          window of msquic under default configuration.
+          bandwidth-delay product exceeds the 32\,MB per-stream receive window
+          configured for msquic.
     \item \textbf{Packet loss}: 0\%, 0.1\%, 0.5\%, 1\%, 2\%.
     \item \textbf{Jitter}: 0, 2, 5, 10\,ms (uniform random, applied per packet).
     \item \textbf{Corruption}: 0\%, 0.05\%, 0.1\%, 0.5\%.
@@ -170,6 +170,32 @@ The 43,200 runs per implementation were distributed across the 16 machines
 using a deterministic sharding scheme (\texttt{--shard K --of 16}).
 Each machine processed an independent, non-overlapping subset of the
 configuration matrix, and results were consolidated after the runs completed.
+
+\subsection{Implementation configuration and parity}
+\label{subsec:config-parity}
+
+The goal is a fair comparison of each implementation as its own documentation
+presents it for a bulk-throughput workload, not an artificial equalisation. In
+practice, three things are applied uniformly across all five stacks. First,
+each is given a flow-control (or receive-buffer) window scaled to the
+bandwidth-delay product, the QUIC analogue of sizing the TCP receive buffer,
+since the stacks' out-of-the-box windows are too small to fill a high-BDP pipe.
+Second, every container applies the same OS-level socket-buffer tuning
+(\texttt{net.core} \texttt{rmem}/\texttt{wmem} raised to 64\,MB) and uses CUBIC
+congestion control. Third, each stack uses the high-throughput send path its
+own documentation recommends, namely Generic Segmentation Offload and kernel
+pacing. For quiche this is written in application code following Cloudflare's
+reference apps~\cite{cloudflare-quiche-gso}, because quiche is a sans-I/O
+library that leaves the socket to the caller. In contrast, msquic, mvfst, and
+quic-go provide the same mechanisms internally and only need to be enabled.
+
+Two configuration details are worth recording. quic-go v0.47 aborts connections
+above roughly 1\,Gbit/s with a "too many gaps" error, owing to a hard-coded
+limit of 1000 stream-frame gaps. Due to this reason, the limit is raised to 100000
+by a one-line source patch so the connection survives at the bandwidths tested.
+And while msquic receives the same BDP-scaled windows as the others, it still
+degrades at high bandwidth-delay products (Section~\ref{subsec:fc-limited}).
+That behaviour is reported as measured rather than tuned around.
 
 % =============================================================================
 \section{Dataset Construction}
@@ -281,32 +307,29 @@ winners driven by overhead rather than throughput.
 \label{subsec:fc-limited}
 
 A binary feature \texttt{fc\_limited} is derived from the bandwidth and RTT
-values of each condition. msquic~v2.3.5 defaults its connection-level flow
-control window to 16\,MB~\cite{microsoft-msquic}, defined in
-\texttt{src/core/quicdef.h} (line~233) as:
+values of each condition. For msquic (v2.4.4) we configure the initial
+per-stream receive window at 32\,MB and the connection-level flow-control
+window at 128\,MB, overriding msquic's built-in defaults~\cite{microsoft-msquic}
+of 64\,KB (\texttt{QUIC\_DEFAULT\_STREAM\_FC\_WINDOW\_SIZE}) and 16\,MB
+(\texttt{QUIC\_DEFAULT\_CONN\_FLOW\_CONTROL\_WINDOW}). From this initial value
+msquic auto-tunes the per-stream window upward, doubling it on an RTT-gated
+schedule and capping it at the connection-level window.
 
-\begin{verbatim}
-#define QUIC_DEFAULT_CONN_FLOW_CONTROL_WINDOW   0x1000000  // 16MB
-\end{verbatim}
-
-While this value is configurable at runtime via the \texttt{QUIC\_SETTINGS}
-API, our test setup uses the default configuration throughout, reflecting the
-experience of a developer deploying msquic without specialised tuning.
-When the BDP approaches or exceeds this window, msquic can no longer keep the
-pipe full and timeout rates rise sharply. Inspecting the dataset confirms
-this: msquic times out in 32.3\% of conditions where \texttt{fc\_limited=1},
-compared to 6.7\% elsewhere. The threshold is set at 32\,MB, twice the
-default window, as a conservative empirical boundary that captures the
-onset of the degradation regime:
+Empirically, msquic's reliability drops sharply once the bandwidth-delay
+product exceeds the 32\,MB initial window: it times out in 32.3\% of conditions
+where \texttt{fc\_limited=1}, compared to 6.7\% elsewhere, rising to 44.4\% at
+RTT\,=\,300\,ms. The \texttt{fc\_limited} feature marks this regime:
 
 \[
     \texttt{fc\_limited} = \left[ \frac{\texttt{bandwidth\_mbps} \times
     \texttt{rtt\_ms}}{8000} > 32 \right]
 \]
 
-Including \texttt{fc\_limited} explicitly gives the Random Forest a concrete
-tell for this circumstance rather than requiring it to discover the threshold
-implicitly from the continuous bandwidth and RTT features alone.
+We treat the 32\,MB boundary as an empirically determined threshold rather than
+a hard protocol limit. Including \texttt{fc\_limited} explicitly gives the
+Random Forest a concrete tell for this regime rather than requiring it to
+discover the threshold implicitly from the continuous bandwidth and RTT
+features alone.
 
 % =============================================================================
 \section{Training Pipeline}
