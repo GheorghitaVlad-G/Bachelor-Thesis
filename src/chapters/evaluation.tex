@@ -491,9 +491,9 @@ effective round-trip loss is $1-(1-p)^2$ rather than $p$.
       quiche$^*$ & 57.7\% \\
     mobile\_lossy &
       BW 20\,Mbps, RTT 80\,ms, loss 2\%, jitter 5\,ms &
-      BW 20\,Mbps, RTT 81.6\,ms, loss 13.3\%$^\dagger$, jitter 9.0\,ms &
-      quiche (20.6\%), msquic (46.1\%) &
-      quiche$^\ddagger$ & 62.8\% \\
+      BW 20\,Mbps, RTT 80.2\,ms, loss 3.3\%$^\dagger$, jitter 9.1\,ms &
+      quiche (19.6\%), msquic (23.8\%) &
+      tcp & 95.9\% \\
     latency\_sensitive &
       BW 500\,Mbps, RTT 150\,ms, loss 0.5\%, jitter 2\,ms &
       BW 500\,Mbps, RTT 150.2\,ms, loss 0\%, jitter 12.0\,ms &
@@ -507,7 +507,6 @@ effective round-trip loss is $1-(1-p)^2$ rather than $p$.
     \hline
     \multicolumn{6}{l}{$^*$ confidence below the 60\% stability threshold (recommendation is borderline).} \\
     \multicolumn{6}{l}{$^\dagger$ measured loss exceeds configured. netem applies the rate independently on each leg.} \\
-    \multicolumn{6}{l}{$^\ddagger$ quiche ranked first by Stage~2 despite Stage~1 elimination (see text).} \\
   \end{tabular}
   }
 \end{table}
@@ -530,16 +529,18 @@ and 300\,ms with elevated loss, quiche and msquic time out too often to be
 reliable, and mvfst also fails its Stage~1 gate. TCP's stable kernel stack is
 the only sensible choice.
 
-\textbf{Stage~1 and Stage~2 disagree (mobile\_lossy).} This is the most
-interesting case. quiche gets eliminated by Stage~1 at 20.6\% timeout
-probability, but Stage~2 still ranks it first at 62.8\%, above TCP at
-36.1\%. The measured loss was 13.3\%, far above the training range maximum
-of 2\%. Stage~1, trained on per-run failure rates, correctly flags that
-quiche will time out roughly one run in five at this loss rate. Stage~2,
-optimising composite score, still prefers quiche's throughput over TCP
-because it was trained at lower loss values where quiche is the better
-option. The prober surfaces both outputs separately and flags the conflict,
-leaving the decision to the operator.
+\textbf{Stage~1 overrides Stage~2 (mobile\_lossy).} This is the most
+interesting case, because the two stages pull in opposite directions. On raw
+performance quiche is the strongest candidate, and Stage~2's ranking puts it
+first. But the measured loss averaged 3.3\%, above the 2\% maximum seen during
+training, and Stage~1 flags quiche as likely to time out (19.6\%, over the 10\%
+threshold), alongside msquic (23.8\%). Since an eliminated implementation
+cannot be recommended, the prober drops quiche and returns TCP at 95.9\%
+confidence, while noting explicitly that quiche was the top performer but was
+ruled out on reliability. This is what the two-stage design is for: Stage~1
+guards against an implementation that looks fast on average yet fails outright
+in a meaningful fraction of runs, and the trade-off is reported rather than
+hidden.
 
 \subsection{Parameter sweeps}
 \label{subsec:sweeps}

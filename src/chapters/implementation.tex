@@ -30,7 +30,7 @@ hundreds of gigabytes per test run, making the evaluation of a big number of
 parameter combinations completely impractical.
 
 To address this, we built a set of custom \textit{continuous-streaming}
-implementations under \texttt{quic-continuous-implementations/}.
+implementations under \texttt{quic-\allowbreak continuous-\allowbreak implementations/}.
 These servers and clients stream data indefinitely for a fixed wall-clock duration,
 operating the same way as \texttt{iperf3} does for TCP. A TCP baseline was added alongside
 them. We also extended the runner with batch testing infrastructure\
@@ -562,13 +562,20 @@ more packets to detect with statistical confidence.
 \subsection{Stability averaging}
 \label{subsec:stability}
 
-A single probe round can be misleading on a variable link. The prober
-runs $N$ rounds (default 3) and averages the \texttt{recommend()} output
-across rounds. Probabilities from each round's ranking are averaged and
-renormalised, timeout probabilities are averaged independently and
-eliminated implementations are re-derived from the averaged timeout
-probabilities. This ensures that an implementation eliminated in most
-rounds but not the last still appears eliminated in the final output.
+A single probe round can be misleading on a variable link. The prober runs
+$N$ rounds (default 3) and combines the \texttt{recommend()} output across
+them. Timeout probabilities are averaged per implementation and the eliminated
+set is re-derived from those averages, so an implementation eliminated in most
+rounds (but not the last) still counts as eliminated. The per-round Stage~2
+ranking probabilities are averaged as well, and then, mirroring the single-round
+logic, the averaged ranking is restricted to the surviving implementations
+before the top one is chosen. This last step matters: without it a borderline
+implementation that survives some rounds and is eliminated in others can end up
+both top-ranked and eliminated, because the two averages are computed
+independently. If the implementation with the best averaged performance is one
+that gets eliminated on timeout risk, the prober still reports it, but as a note
+explaining that the recommendation is a more reliable fallback rather than the
+fastest option.
 
 The confidence of the averaged recommendation is compared against a
 stability threshold (default 60\%). If confidence falls below this value,
@@ -579,7 +586,7 @@ that either would be a reasonable choice, and suggests running more rounds.
 \label{subsec:stable-recommender}
 
 For scenarios where the prober runs continuously and drives automatic
-re-deployment, a \texttt{StableRecommender} class provides a hysteresis
+re-deployment, a \texttt{Stable\allowbreak Recommender} class provides a hysteresis
 gate. It tracks a candidate challenger to the currently deployed
 implementation and only triggers a switch when the challenger has been
 top-ranked for a configurable number of consecutive rounds (default 3)
