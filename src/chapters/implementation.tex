@@ -32,8 +32,13 @@ parameter combinations completely impractical.
 To address this, we built a set of custom \textit{continuous-streaming}
 implementations under \texttt{quic-\allowbreak continuous-\allowbreak implementations/}.
 These servers and clients stream data indefinitely for a fixed wall-clock duration,
-operating the same way as \texttt{iperf3} does for TCP. A TCP baseline was added alongside
-them. We also extended the runner with batch testing infrastructure\
+operating the same way as \texttt{iperf3} does for TCP. This also removes a side
+cost of the file-transfer model: the original approach required generating a
+fixed-size payload up front, typically a file pulled from \texttt{/dev/random}
+and stored on disk, whereas a continuous stream simply repeats an in-memory data
+pattern (as \texttt{iperf3} does), so there is no disk I/O and no pre-generated
+file to manage. A TCP baseline was added alongside them. We also extended the
+runner with batch testing infrastructure\
 (\texttt{run\_measurements.py}) to go through network condition combinations
 automatically.
 
@@ -55,9 +60,9 @@ few hundred combinations would have taken weeks of continuous execution.
 \textbf{Suspicious results.} Beyond the run time, the measured performance
 figures were clearly artifacts of the simulation layer rather than
 representative of real network and protocol behaviour. As a concrete example, quic-go
-transferred a 10\,MB file over a nominal 10\,Mbps link in 57,962\,ms, nearly
-eight times longer than the theoretical minimum of approximately 8\,seconds.
-ngtcp2 paired with nginx took 76,688\,ms for the same transfer, an order of
+transferred a 10\,MB file over a nominal 10\,Mbps link in 57.962\,s, nearly
+eight times longer than the theoretical minimum of approximately 8\,s.
+ngtcp2 paired with nginx took 76.688\,s for the same transfer, an order of
 magnitude above the expected duration. These discrepancies were consistent
 across runs and across implementations, showing ns3 overhead rather than real
 implementation behaviour.
@@ -82,16 +87,14 @@ QUIC stack behaviour on Linux.
 Each test run instantiates three containers from a single
 \texttt{docker-compose.yml}: \texttt{server}, \texttt{sim}, and
 \texttt{client}. The server and client containers each belong to a dedicated
-Docker bridge network, \texttt{server\_net} (172.28.100.0/24) and
-\texttt{client\_net} (172.28.0.0/24) respectively. The simulator container is
-connected to both networks simultaneously and acts as the only forwarding path
-between the two endpoints.
+Docker bridge network, \texttt{server\_net} and \texttt{client\_net}
+respectively. The simulator container is connected to both networks
+simultaneously and acts as the only forwarding path between the two endpoints.
 
-Static IP addresses are assigned at container startup: the server receives
-172.28.100.100, the client receives 172.28.0.100, and the simulator occupies
-172.28.100.2 on the server side and 172.28.0.2 on the client side. Each
-endpoint container adds a static route at startup so that traffic destined for
-the remote subnet is directed through the simulator.
+Static IP addresses are assigned to each container at startup (the exact
+addresses and subnets are shown in Figure~\ref{fig:topology}), and each
+endpoint container adds a static route so that traffic destined for the remote
+subnet is directed through the simulator.
 
 The implementation that needs to be tested is selected at compose time via
 the \texttt{IMPL} environment variable (\texttt{quiche}, \texttt{quic-go},
@@ -101,13 +104,40 @@ server and client Dockerfiles to be used while the simulator image remains fixed
 \subsection{Network condition injection}
 \label{subsec:netem}
 
-All network impairments are applied inside the simulator container using a
-two-layer \texttt{tc} configuration. An HTB (Hierarchical Token Bucket) qdisc
-enforces the configured bandwidth ceiling. Meanwhile, a \texttt{netem} qdisc attached as
-a child leaf introduces delay, jitter, packet loss, and bit corruption.
-This configuration is applied independently to both egress interfaces of the
-simulator (\texttt{eth0} facing the client network and \texttt{eth1} facing the
-server network), so that impairments affect traffic in both directions.
+All network impairments are applied inside the simulator container with a
+single \texttt{netem} qdisc per interface. netem introduces delay, jitter,
+packet loss, and bit corruption, and its built-in \texttt{rate} parameter
+enforces the configured bandwidth ceiling, so one qdisc handles both shaping and
+impairment without a separate token-bucket stage. The qdisc is installed
+independently on both egress interfaces of the simulator (\texttt{eth0} facing
+the client network and \texttt{eth1} facing the server network), so that
+impairments affect traffic in both directions.
+
+Inspecting the simulator with \texttt{tc qdisc show} after setup (here a
+100\,Mbit/s link with a 20\,ms RTT, 2\,ms jitter, 1\% loss, and 0.1\%
+corruption) shows the qdisc installed on each interface:
+
+\begin{lstlisting}[numbers=none,breaklines=true,basicstyle=\footnotesize\ttfamily]
+qdisc netem 8001: dev eth0 root refcnt 9 limit 100000 delay 10ms 2ms loss 1% corrupt 0.1% rate 100Mbit
+qdisc netem 8002: dev eth1 root refcnt 9 limit 100000 delay 10ms 2ms loss 1% corrupt 0.1% rate 100Mbit
+\end{lstlisting}
+
+Reading one of these lines:
+\begin{itemize}
+    \item \texttt{netem 8001: ... root} is the netem qdisc installed as the
+          root qdisc on \texttt{eth0} (\texttt{8001:} is its kernel-assigned
+          handle) and \texttt{eth1} carries an identical one (\texttt{8002:}).
+    \item \texttt{rate 100Mbit} is netem's built-in shaper, which caps the
+          egress bandwidth. This is what enforces the link capacity. No separate
+          HTB or token-bucket qdisc is involved.
+    \item \texttt{delay 10ms 2ms} is the one-way delay (half the 20\,ms target
+          RTT) followed by 2\,ms of jitter, while \texttt{loss 1\%} and
+          \texttt{corrupt 0.1\%} are the uniform random loss and bit-corruption
+          rates.
+    \item \texttt{limit 100000} is netem's internal queue length in packets, set
+          high enough that the queue itself is not an unintended bottleneck at
+          the bandwidths tested.
+\end{itemize}
 
 Because of this, a one-way packet traverses exactly one netem stage, giving
 a one-way delay equal to \texttt{DELAY}, making the round-trip time equal to
@@ -167,9 +197,16 @@ remained modest and the additional volumes were ultimately unnecessary,
 though they were kept in place.
 
 The 43,200 runs per implementation were distributed across the 16 machines
-using a deterministic sharding scheme (\texttt{--shard K --of 16}).
-Each machine processed an independent, non-overlapping subset of the
-configuration matrix, and results were consolidated after the runs completed.
+using a deterministic sharding scheme (\texttt{--shard K --of 16}). This is not
+provided by Docker Compose or any external orchestrator, it is a small piece of
+logic in our own batch runner. Each machine enumerates the full condition matrix
+in the same fixed order and then keeps only the entries whose position in that
+ordering satisfies \texttt{index mod 16 == K}, where \texttt{K} is the shard
+number passed to that machine. Because every machine derives its slice from the
+same deterministic ordering, the 16 subsets are guaranteed to be
+non-overlapping and to cover the matrix exactly once, with no central
+coordinator and no communication between machines during the run. Results were
+collected from each machine and consolidated after the runs completed.
 
 \subsection{Implementation configuration and parity}
 \label{subsec:config-parity}
@@ -178,8 +215,9 @@ The goal is a fair comparison of each implementation as its own documentation
 presents it for a bulk-throughput workload, not an artificial equalisation. In
 practice, three things are applied uniformly across all five stacks. First,
 each is given a flow-control (or receive-buffer) window scaled to the
-bandwidth-delay product, the QUIC analogue of sizing the TCP receive buffer,
-since the stacks' out-of-the-box windows are too small to fill a high-BDP pipe.
+bandwidth-delay product, the QUIC analogue of setting the TCP receive-buffer
+size, since the stacks' out-of-the-box windows are too small to fill a
+high-BDP pipe.
 Second, every container applies the same OS-level socket-buffer tuning
 (\texttt{net.core} \texttt{rmem}/\texttt{wmem} raised to 64\,MB) and uses CUBIC
 congestion control. Third, each stack uses the high-throughput send path its
@@ -193,9 +231,16 @@ Two configuration details are worth recording. quic-go v0.47 aborts connections
 above roughly 1\,Gbit/s with a "too many gaps" error, owing to a hard-coded
 limit of 1000 stream-frame gaps. Due to this reason, the limit is raised to 100000
 by a one-line source patch so the connection survives at the bandwidths tested.
-And while msquic receives the same BDP-scaled windows as the others, it still
-degrades at high bandwidth-delay products (Section~\ref{subsec:fc-limited}).
-That behaviour is reported as measured rather than tuned around.
+msquic is the exception to the BDP scaling above. Its per-stream receive window
+is initialised at a fixed 32\,MB while the other stacks size theirs to the full
+BDP up front. From there msquic relies on its internal auto-tuning, which doubles
+the window on an RTT-gated schedule up to the 128\,MB connection window, but does
+so slowly. The 32\,MB initial value was our configuration choice, not a msquic
+limit: msquic accepts any power-of-two window, so it would have taken a
+BDP-sized initial window just like the others. This asymmetry is exactly why
+msquic falls behind at high bandwidth-delay products
+(Section~\ref{subsec:fc-limited}), and that behaviour is reported as measured
+rather than tuned around.
 
 % =============================================================================
 \section{Dataset Construction}
@@ -223,10 +268,10 @@ The following performance metrics are recorded per run:
           after a loss event.
     \item \textbf{tail\_rtt\_ms}: 99th-percentile round-trip time observed
           during the transfer.
-    \item \textbf{srv\_cpu\_mean\_pct}, \textbf{cli\_cpu\_mean\_pct}: mean
-          CPU usage on the server and client respectively.
-    \item \textbf{srv\_mem\_mean\_mib}, \textbf{cli\_mem\_mean\_mib}: mean
-          memory usage on the server and client respectively.
+    \item \textbf{\{srv,cli\}\_cpu\_mean\_pct}: mean CPU usage on the server
+          and client respectively.
+    \item \textbf{\{srv,cli\}\_mem\_mean\_mib}: mean memory usage on the server
+          and client respectively.
 \end{itemize}
 
 Runs where the transfer does not complete within the 30-second measurement window
@@ -280,6 +325,40 @@ Five profiles were defined as examples of realistic deployment scenarios:
           overhead and handshake time.
 \end{itemize}
 
+Table~\ref{tab:profile-weights} gives the full weight vector behind each of
+these profiles.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Composite-score weight vectors for the five deployment profiles.
+           Each column sums to 1.00. \emph{Dir.} is the optimisation direction:
+           $+$ means higher is better (goodput is the only such metric), $-$
+           means lower is better. A dash means the metric is unused in that
+           profile.}
+  \label{tab:profile-weights}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{llrrrrr}
+    \toprule
+    \textbf{Metric} & \textbf{Dir.} & \textbf{datacenter} & \textbf{lightweight}
+      & \textbf{mobile\_lossy} & \textbf{latency\_sensitive} & \textbf{deep\_space} \\
+    \midrule
+    Goodput        & $+$ & 0.80 & 0.25 & 0.40 & 0.30 & 0.30 \\
+    Overhead       & $-$ & 0.05 & 0.05 & 0.05 & 0.05 & 0.10 \\
+    Handshake time & $-$ & --   & --   & --   & 0.20 & 0.05 \\
+    Retransmission & $-$ & 0.05 & 0.10 & 0.25 & 0.10 & 0.25 \\
+    Recovery time  & $-$ & --   & --   & 0.15 & --   & 0.15 \\
+    Tail RTT       & $-$ & 0.05 & 0.05 & 0.10 & 0.30 & 0.15 \\
+    Server CPU     & $-$ & 0.05 & 0.30 & 0.05 & 0.05 & --   \\
+    Server memory  & $-$ & --   & 0.10 & --   & --   & --   \\
+    Client CPU     & $-$ & --   & 0.10 & --   & --   & --   \\
+    Client memory  & $-$ & --   & 0.05 & --   & --   & --   \\
+    \midrule
+    \textbf{Sum}   &     & 1.00 & 1.00 & 1.00 & 1.00 & 1.00 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
 An operator with different priorities, a video streaming service that
 cares primarily about tail latency at moderate loss rates for example,
 could define a custom profile with appropriate weights and obtain a tailored
@@ -303,6 +382,16 @@ Under global normalisation, the 0.05-weight overhead penalty would then
 numerically dominate the 0.80-weight goodput term for most conditions, producing
 winners driven by overhead rather than throughput.
 
+One consequence of normalising against the observed per-condition minimum and
+maximum is that the scaling is tied to the collected dataset. If the dataset is
+later extended, whether with more repetitions of existing conditions, a new
+implementation, or new condition points, the per-condition extremes can shift
+and the composite scores (and therefore the Stage~2 winner labels) have to be
+recomputed. This is not a runtime cost: normalisation, labelling, and training
+are all part of the same offline pipeline, so extending the dataset simply means
+rerunning that pipeline rather than patching the live model. The prober, which
+only consumes already-trained models, is unaffected.
+
 \subsection{Derived feature: fc\_limited}
 \label{subsec:fc-limited}
 
@@ -315,10 +404,19 @@ of 64\,KB (\texttt{QUIC\_DEFAULT\_STREAM\_FC\_WINDOW\_SIZE}) and 16\,MB
 msquic auto-tunes the per-stream window upward, doubling it on an RTT-gated
 schedule and capping it at the connection-level window.
 
-Empirically, msquic's reliability drops sharply once the bandwidth-delay
-product exceeds the 32\,MB initial window: it times out in 32.3\% of conditions
-where \texttt{fc\_limited=1}, compared to 6.7\% elsewhere, rising to 44.4\% at
-RTT\,=\,300\,ms. The \texttt{fc\_limited} feature marks this regime:
+Empirically, this initial window has two distinct effects once the
+bandwidth-delay product exceeds 32\,MB. First, it caps msquic's throughput
+regardless of conditions: throughput is bounded by roughly window/RTT, so even
+on a perfectly clean link msquic reaches only a fraction of the link rate (a
+median of about 112\,Mbps on a 2.5\,Gbit/s path in our data). Second, and only
+when packet loss, corruption, or competing traffic is also present, msquic
+stalls and fails to finish within the measurement window. It times out in 32.3\%
+of \texttt{fc\_limited=1} conditions overall, compared to 6.7\% elsewhere, rising
+to 44.4\% at RTT\,=\,300\,ms and to 62\% at 2\% loss (on clean high-BDP links it
+never times out). So \texttt{fc\_limited} marks the regime where msquic is both
+throughput-limited and, under impairment, prone to timing out, which is why the
+feature helps both the timeout classifiers (Stage~1) and the profile rankers
+(Stage~2). The \texttt{fc\_limited} feature marks this regime:
 
 \[
     \texttt{fc\_limited} = \left[ \frac{\texttt{bandwidth\_mbps} \times

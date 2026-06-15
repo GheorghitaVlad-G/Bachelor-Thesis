@@ -1,4 +1,233 @@
 \chapter{Background}
 \label{chapter:background}
 
-\radu{aici ai de adaugat teorie despre tehnologiile folosite}
+This chapter covers the concepts the rest of the thesis builds on: what QUIC
+is and why it exists, the five implementations under test, the network
+parameters used to describe a connection, how those conditions are emulated
+with Linux traffic control, and the machine learning method behind the
+recommender.
+
+% =============================================================================
+\section{The QUIC Protocol}
+\label{sec:bg-quic}
+
+QUIC is a transport protocol that runs on top of UDP. It started at Google
+and was later standardised by the IETF in RFC~9000~\cite{rfc9000}. The reason
+it exists is that TCP combined with TLS has a few problems that are hard to
+fix without breaking compatibility with the existing internet.
+
+The first is \textbf{head-of-line blocking}. TCP delivers a single ordered byte
+stream, so if one packet is lost, everything behind it waits until that packet
+is retransmitted, even when those later bytes belong to a completely unrelated
+request. QUIC avoids this by carrying multiple independent streams in one
+connection: a loss on one stream does not stall the others.
+
+The second is \textbf{handshake latency}. A TCP connection needs its own handshake, and
+then TLS needs another one on top. QUIC folds the transport and cryptographic
+handshakes together~\cite{rfc9001}, so a new connection is ready after one
+round trip, or zero round trips if the client has talked to the server
+before.
+
+The third is \textbf{ossification}. Because TCP lives in the operating system kernel
+and its headers are visible on the wire, middleboxes along the path came to
+depend on its exact behaviour, which makes the protocol very hard to change.
+QUIC runs in user space and encrypts almost everything, including most of its
+own control information, so it can keep evolving without middleboxes getting
+in the way. Running in user space has a second benefit for mobile clients:
+QUIC connections are identified by a \emph{connection ID} rather than the usual
+four-tuple (source IP, source port, destination IP, destination port), so a connection
+can survive the client changing its IP address, for example when a phone moves from
+WiFi to cellular.
+
+\textbf{Loss detection and congestion control} are specified separately in
+RFC~9002~\cite{rfc9002}, and the version-independent properties of the wire
+format are described in RFC~8999~\cite{rfc8999}. The original design and
+large-scale deployment experience are documented by Langley et
+al.~\cite{langley2017quic}.
+
+QUIC is not a free win, though. Running the transport in user space means more
+CPU work per byte than the kernel TCP stack, and on very fast links this
+overhead can actually make QUIC slower than TCP. Recent work by Zhang et
+al.~\cite{zhang2024quic} measured the UDP+QUIC+HTTP/3 stack losing up to
+45\% of throughput compared to TCP+TLS+HTTP/2 over fast connections. This
+trade-off, where QUIC helps in some conditions and hurts in others, is exactly
+what motivates this thesis.
+
+Part of that per-byte cost comes from sending and receiving one UDP datagram at
+a time, since each datagram crosses the user/kernel boundary on its own. Linux
+offers two offload mechanisms to amortise this. \textbf{Generic Segmentation
+Offload (GSO)} lets the application hand the kernel one large buffer plus a
+segment size, while the kernel (or the NIC) splits it into MTU-sized datagrams late
+in the send path, so a single system call emits many packets. \textbf{Generic
+Receive Offload (GRO)} is the receive-side counterpart: it coalesces several
+incoming datagrams into one buffer before passing them up. Both cut the number
+of system calls per byte, which is exactly the cost that hurts QUIC on fast
+links, so they matter for any high-throughput UDP transport. These
+abbreviations are used in the rest of the thesis.
+
+% =============================================================================
+\section{QUIC Implementations}
+\label{sec:bg-implementations}
+
+There is one QUIC specification but many independent implementations of it,
+and they do not all behave the same way. Marx et al.~\cite{marx2020same}
+studied this directly and found large differences between stacks in how they
+handle flow control, congestion control, multiplexing, and other features,
+along with bugs and missing optimisations. So "which QUIC" is a real question,
+not a minor detail, and it is the question this thesis tries to answer.
+
+This work tests five implementations. For each of the four QUIC stacks we wrote
+our own continuous-streaming server and client against the library's API rather
+than using any bundled tool, so that all of them share the same workload and
+measurement logic (Section~\ref{sec:impl-interop-runner}).
+
+\begin{itemize}
+  \item \textbf{quiche} (Cloudflare, written in Rust). Its defining trait is a
+        \emph{sans-I/O} design: the library handles QUIC connection state but
+        leaves the UDP socket and event loop to the application, so the caller
+        decides how packets are sent and received. Tunable parameters such as
+        the flow-control windows, idle timeout, and congestion-control
+        algorithm are set at runtime through a \texttt{Config} object rather
+        than chosen at compile time. Because the socket is the caller's
+        responsibility, the high-throughput send path (GSO and kernel pacing)
+        has to be wired up in application code. Our server does this following
+        Cloudflare's reference examples~\cite{cloudflare-quiche-gso}.
+  \item \textbf{msquic} (Microsoft, written in C). A cross-platform core that
+        backs HTTP/3 on Windows and in .NET, built around its own worker-thread
+        datapath. It becomes flow-control limited at high bandwidth-delay
+        products, a detail that matters in the results
+        (Section~\ref{sec:bg-network-params}).
+  \item \textbf{mvfst} (Meta, written in C++). Built on Meta's Folly and Fizz
+        libraries and run in production for Facebook and Instagram traffic.
+        Unlike the others it does not expose the socket to the caller. Our
+        benchmark server and client are written directly against its
+        \texttt{QuicServer}/\texttt{QuicClient} API on top of a Folly event loop.
+  \item \textbf{quic-go} (written in Go). A pure-Go implementation with no C
+        dependencies, which makes it easy to embed (it backs the Caddy web
+        server, among others). It runs entirely in user space on top of Go's
+        runtime and garbage collector.
+  \item \textbf{TCP with TLS~1.3}, used as the baseline the QUIC
+        implementations are compared against. For brevity, this stack is
+        referred to as simply \emph{TCP} throughout the thesis.
+\end{itemize}
+
+In the configurations measured here, none of these stacks use newer kernel
+interfaces such as \texttt{io\_uring}, they all run over the conventional
+epoll-based UDP path, batching packets with GSO on the send side. The differences between these stacks, in throughput, CPU usage, and
+behaviour under loss, are what the dataset captures and what the recommender
+learns from.
+
+% =============================================================================
+\section{Network Condition Parameters}
+\label{sec:bg-network-params}
+
+A connection is described here by a small set of parameters, each of which is
+varied during data collection:
+
+\begin{itemize}
+  \item \textbf{Bandwidth} -- the capacity of the link, in Mbps.
+  \item \textbf{RTT} -- the round-trip time, how long a packet takes to reach
+        the other end and come back.
+  \item \textbf{Loss} -- the fraction of packets dropped on the way.
+  \item \textbf{Jitter} -- variation in delay from one packet to the next.
+  \item \textbf{Corruption} -- the fraction of packets that arrive with
+        flipped bits.
+  \item \textbf{Competing traffic} -- background TCP or UDP load sharing the
+        link.
+\end{itemize}
+
+The one concept that ties bandwidth and RTT together is the
+\textbf{bandwidth-delay product} (BDP), which is bandwidth multiplied by RTT. It is the amount of data
+that has to be in flight at once to keep a link fully busy. The BDP matters a
+lot in practice: an implementation whose flow-control window is smaller than
+the BDP cannot fill the pipe, no matter how fast the link is. This is the main
+reason msquic struggles at high bandwidth and high RTT. In this work msquic
+starts each stream with a 32~MB receive window (it can auto-tune higher, but
+does so slowly), and once the BDP grows past that window its reliability drops
+sharply. The \texttt{fc\_limited} feature used by the model marks conditions
+where the BDP exceeds 32~MB, which is where the problem empirically sets in.
+
+% =============================================================================
+\section{Network Emulation with tc/netem}
+\label{sec:bg-netem}
+
+The network conditions above are not collected from a real network but
+emulated on a Linux host, using the kernel's traffic control subsystem
+(\texttt{tc}). The central concept in \texttt{tc} is the \textbf{queueing
+discipline (qdisc)}: the algorithm attached to a network interface that decides
+how outgoing packets are queued, delayed, reordered, or dropped before they
+leave. Every interface has a qdisc, which by default is a simple first-in
+first-out queue, but it can be replaced with one that actively shapes or impairs
+traffic.
+
+This work uses a single \texttt{netem} (network emulation)
+qdisc~\cite{hemminger2005netem} per interface. netem injects delay, jitter,
+loss, and corruption, and its built-in \texttt{rate} parameter also caps the
+bandwidth, so one qdisc both shapes and impairs the link. Emulation is used
+instead of a real network because it is repeatable: the exact same conditions
+can be applied again and again, which is what makes a clean dataset possible.
+
+With this in mind, and also because it shows up in the results, it is worth noting that
+netem rules are applied per interface, on the way out. The simulator in this
+setup sits between the client and the server with rules on both of its
+interfaces, so a packet making a full round trip crosses the impairment twice.
+That is why, in the evaluation, the loss rate measured by the prober comes out
+higher than the value that was configured.
+
+% =============================================================================
+\section{Random Forest Classifiers}
+\label{sec:bg-random-forest}
+
+The recommender is built on random forests. A decision tree splits the data on
+feature thresholds, one question at a time, until it reaches a prediction. A
+single tree is easy to read but tends to overfit, learning the training data
+too closely and generalising poorly. A random forest fixes this by training
+many trees, each on a bootstrapped sample of the data and a random subset of
+the features, and averaging their predictions~\cite{breiman2001random}. The
+averaging cancels out the noise of individual trees and gives a model that
+generalises well.
+
+It is worth saying briefly why a random forest, and not something else. A
+\emph{neural network} would be overkill: the data here is tabular and fairly small,
+on the order of tens of thousands of conditions with eight features, while
+deep models want far more data and a lot of tuning, train slowly, and do not
+explain themselves. \emph{Linear models} such as logistic regression are the
+opposite problem, too weak, because the important effects are non-linear, like
+the BDP threshold that decides whether msquic times out or the way loss and
+RTT interact. \emph{Gradient boosting} (XGBoost~\cite{chen2016xgboost},
+LightGBM~\cite{ke2017lightgbm}) is the honest closest competitor and is often
+just as good or better, but it is more sensitive to its hyperparameters,
+whereas a random forest gives robust results with very little
+tuning~\cite{probst2019hyperparameters}.
+
+A different framing worth mentioning is \emph{online learning}, such as multi-armed
+bandits~\cite{vermorel2005multiarmed} or contextual
+bandits~\cite{lu2010contextual}, which treat selection as an
+explore-and-exploit problem: keep trying options in production and learn from
+the outcomes. The exploration part is what does not fit here. The dataset is
+collected offline and labelled, so the model can be trained once and then make
+a recommendation straight from measured conditions, without ever having to
+deploy a deliberately suboptimal implementation just to see how it does. That
+matters because a bad choice on a live connection has a real cost. This does
+not rule out running the recommender continuously: the prober can re-measure
+and re-recommend on a schedule, and a small hysteresis gate keeps it from
+flipping between two nearly equal implementations on a noisy link. But every
+one of those decisions is still a one-shot supervised prediction, not an
+experiment. Supervised classification is the right fit, and random forests
+have also been used successfully on QUIC traffic in related
+work~\cite{app2023quicensemble}.
+
+Two more features of random forests matter for this thesis. The first is
+feature importance: the model can report how much each input contributes to
+its decisions, which keeps the recommendations explainable rather than a black
+box. This work uses permutation importance, measured on held-out data, rather
+than the default impurity-based importance, because the impurity measure is
+biased toward high-cardinality continuous features~\cite{strobl2007bias}.
+
+The second is cross-validation. Each network condition in the dataset is
+measured ten times to average out noise, which means a plain random
+train/test split would put near-identical rows on both sides and make the
+model look more accurate than it really is. To avoid this leakage, all
+accuracy numbers use GroupKFold cross-validation, which keeps every repetition
+of a given condition together in the same fold. This is what makes the
+accuracy figures in the evaluation trustworthy.

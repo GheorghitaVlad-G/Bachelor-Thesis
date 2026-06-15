@@ -13,7 +13,7 @@ The out-of-bag (OOB) score is reported as a secondary check.
 \section{Dataset}
 \label{sec:dataset}
 
-The full dataset contains 216,000 rows: 43,200 unique network conditions
+The full dataset contains 216,000 rows: 4,320 unique network conditions
 measured across five implementations. Conditions are defined by seven
 parameters: bandwidth (50--5,000\,Mbps), RTT (10--300\,ms), packet loss
 (0--2\%), jitter (0--10\,ms), bit corruption (0--0.5\%), and two competing
@@ -58,11 +58,12 @@ each implementation across the clean $20\times 20$ grid.
   \label{fig:goodput-heatmaps}
 \end{figure}
 
-The differences are large. quiche peaks above 2,400\,Mbps at high bandwidth
-and low RTT, driven by Linux-specific GSO send-path and kernel pacing via
-\texttt{SO\_TXTIME}~\cite{cloudflare-quiche-gso}. TCP reaches similar peaks
-at low RTT. msquic performs well at moderate BDP. quic-go and mvfst cap
-out early and do not benefit from higher bandwidth.
+The differences are large. At high bandwidth and low RTT, TCP and msquic reach
+the highest peaks (around 4,700\,Mbps each), with quiche close behind at roughly
+3,850\,Mbps, helped by its Linux-specific GSO send path and kernel pacing via
+\texttt{SO\_TXTIME}~\cite{cloudflare-quiche-gso}. quic-go peaks around
+2,600\,Mbps and mvfst around 900\,Mbps, both capping out early and not gaining
+any benefit from higher bandwidth.
 
 Raw goodput in isolation does not tell the whole story. Figure~\ref{fig:bw-utilization}
 shows the same data as a fraction of the configured bandwidth rather than as
@@ -79,9 +80,9 @@ an absolute throughput number.
 
 At low RTT, TCP and msquic nearly saturate the link. As RTT grows, every
 implementation degrades but at very different rates. At 5,000\,Mbps and
-300\,ms RTT (BDP $\approx 187$\,MB), quiche and quic-go fall below 2\%
-utilisation, unable to fill the pipe. msquic does better at 62\%, but is
-still far from line-rate. The link is not congested, which means the
+300\,ms RTT (BDP $\approx 187$\,MB), quiche, quic-go, and mvfst all fall to
+roughly 1--2\% utilisation, unable to fill the pipe. msquic does better at 62\%,
+but is still far from line-rate. The link is not congested, which means the
 implementations are the bottleneck. This spread is one of the main things
 the recommender needs to capture.
 
@@ -162,7 +163,7 @@ against the 10\% elimination threshold.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.6\textwidth]{src/img/eval/fig_timeout_rates.pdf}
-  \caption{Timeout rate per implementation across 43,200 conditions each.
+  \caption{Timeout rate per implementation across 43,200 runs each.
            The dashed line marks the 10\% Stage~1 elimination threshold.}
   \label{fig:timeout-rates}
 \end{figure}
@@ -190,9 +191,9 @@ how often each implementation wins per profile.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{src/img/eval/fig_winner_distribution.pdf}
-  \caption{Fraction of the 43,200 conditions won by each implementation under
-           each profile's composite scoring. mvfst and quic-go win less than
-           1\% combined in every profile.}
+  \caption{Fraction of the 4,320 conditions won by each implementation under
+           each profile's composite scoring. mvfst and quic-go together win at
+           most 1.1\% of conditions in any profile.}
   \label{fig:winner-distribution}
 \end{figure}
 
@@ -219,8 +220,8 @@ The profiles produce very different answers. quiche wins 90.2\% of datacenter
 conditions because that profile weights goodput at 0.80 and quiche's GSO
 send path is the fastest on that metric. TCP wins 99.4\% of lightweight
 conditions because that profile weights server CPU at 0.30 and TCP's
-kernel-space stack consumes roughly five times less CPU than quiche at the
-same throughput, as measured in this dataset. The latency-sensitive and deep-space profiles produce near-ties
+kernel-space stack consumes several times less CPU than quiche (a median of
+roughly seven times less server CPU across clean runs in this dataset). The latency-sensitive and deep-space profiles produce near-ties
 between quiche and TCP (39.7\%/49.8\% and 46.2\%/47.8\% respectively),
 reflecting conditions where quiche's throughput advantage trades off against
 TCP's lower overhead. mvfst and quic-go never win enough to matter in any
@@ -251,7 +252,7 @@ for the same condition.
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=0.6\textwidth]{src/img/eval/fig_profile_disagreement.pdf}
-  \caption{Pairwise profile disagreement: fraction of the 43,200 conditions
+  \caption{Pairwise profile disagreement: fraction of the 4,320 conditions
            where two profiles recommend different implementations. The diagonal
            is zero (a profile always agrees with itself).}
   \label{fig:profile-disagreement}
@@ -462,10 +463,16 @@ via \texttt{--bw} rather than measured by iperf3, to avoid saturating the
 netem buffer in the Docker Desktop WSL2 environment at low configured rates.
 
 Table~\ref{tab:prober-validation} summarises the five static profile tests.
-The prober reproduced configured RTT within 1\,ms in every case. Loss was
-amplified above the configured value in the mobile\_lossy and deep\_space
-scenarios: each packet crosses two netem qdiscs (one per direction), so the
-effective round-trip loss is $1-(1-p)^2$ rather than $p$.
+The prober reproduced configured RTT within 1\,ms in every case. Measured loss
+ran above the configured value in the mobile\_lossy and deep\_space scenarios.
+The prober estimates loss from a small ICMP ping sample, and a ping is counted
+as lost if either its request or its reply is dropped, so the expected estimate
+is the round-trip loss $1-(1-p)^2$ (roughly $2p$) rather than the one-way
+configured $p$. The match is only approximate: with a few tens of probes per
+run the estimate is noisy, and at high RTT with jitter some replies arrive after
+the ping timeout and add to the count. This is why deep\_space (configured 3\%,
+measured 8.3\%) overshoots even the round-trip value while mobile\_lossy
+(configured 2\%, measured 3.3\%) sits just below it.
 
 \begin{table}[htbp]
   \centering
