@@ -1,4 +1,125 @@
 \chapter{Introduction}
 \label{chapter:introduction}
 
-\radu{Ca si structura, vorbeste despre astea in ordine: 1) care este problmea pe care vrei sa o rezolvi / ce relevanta are? pune referinte gen asta \cite{kempf2024quic} din \texttt{references.bib} (cauta articolul pe google scholar -- cite -- BibTex) 2) prezinta 2-3 research question-uri (RQ1, RQ2, etc.) si detaliaza intr-un paragraf la fiecare ce vrei sa obtii. 3) declara care sunt contributiile lucrarii (bullet points, daca vrei neaparat) 4) cum este organizat restul lucrarii (e.g., in sectiunea 2 prezentam un overview arhitecutral, in sectiunea 3 oferim detalii de implementare, etc.}
+QUIC is a UDP-based transport protocol that now carries a large share of web
+traffic, and unlike TCP it is implemented entirely in user space. That has led
+to many independent implementations, written by different organisations in
+different languages, all following the same specification but not behaving the
+same way. The differences are not small. Jaeger et al.~\cite{jaeger2023quic}
+benchmarked several QUIC stacks on high-rate links and found that throughput
+under the same network conditions ranged from under 100\,Mbit/s to nearly
+5\,Gbit/s depending only on which client and server implementation was used.
+QUIC is also not automatically faster than TCP: Zhang et
+al.~\cite{zhang2024quic} measured the QUIC stack losing up to 45\% of its
+throughput against TCP on fast connections, because of the extra per-packet CPU
+cost of running in user space.
+
+So the question "which transport should I deploy?" does not have a fixed
+answer. The best choice depends on the network the connection will run over and
+on what the deployment actually cares about, whether that is raw throughput, low
+latency, resilience to packet loss, or CPU efficiency on constrained hardware.
+Today that decision is made by hand, if it is made deliberately at all: an
+engineer picks an implementation based on familiarity or reputation and rarely
+revisits it. There is no tool that takes measured network conditions and turns
+them into a recommendation. Closing that gap is the goal of this thesis.
+
+% =============================================================================
+\section{Research Questions}
+\label{sec:intro-rqs}
+
+This work is organised around three research questions.
+
+\textbf{RQ1: Does the best transport implementation actually depend on network
+conditions and deployment priorities, or is there a single overall winner?}
+Before building anything that recommends an implementation, it is worth
+establishing that the choice is real. This question is answered empirically, by
+measuring all five implementations across a wide grid of network conditions and
+checking whether the winner shifts as bandwidth, RTT, loss, and the optimisation
+target change.
+
+\textbf{RQ2: Can a model trained offline on emulated measurements predict the
+right implementation from observable network features, and how accurately?}
+If the choice depends on conditions, the next question is whether it can be
+learned. This means training a model on the collected dataset, measuring how
+well it generalises to conditions it has not seen, and being honest about where
+and why it fails.
+
+\textbf{RQ3: Can such a recommender run against a live connection?} A model that
+only works on a pre-recorded dataset is of limited use. The final question is
+whether the same model can be driven by a tool that measures a real connection's
+conditions on the spot and produces a usable recommendation, together with a
+signal of how confident it is.
+
+% =============================================================================
+\section{Contributions}
+\label{sec:intro-contributions}
+
+This thesis makes the following contributions.
+
+\textbf{A custom benchmarking framework and dataset.} A three-container Docker
+setup applies reproducible network conditions with \texttt{tc/netem} and
+measures five transport implementations (quiche, msquic, mvfst, quic-go, and a
+TCP\,+\,TLS\,1.3 baseline). Running it across a systematic grid of conditions
+produced a dataset of 216{,}000 labelled runs.
+
+\textbf{A two-stage recommender.} The model first eliminates implementations
+likely to time out under the given conditions, then ranks the survivors with a
+profile-specific classifier built on random forests. The profile scoring is
+generic: a new deployment priority can be added by defining a weight vector,
+without re-running any experiments.
+
+\textbf{A live network prober.} A deployment tool measures a real connection's
+conditions and feeds them to the recommender, returning a ranked recommendation
+with a confidence value and a stability flag, in both a cooperative and a
+passive measurement mode.
+
+\textbf{An empirical study of the result.} The evaluation shows that the best
+implementation genuinely shifts with conditions and deployment profile, reports
+the recommender's accuracy per stage and per profile, and accounts honestly for
+its limits, in particular the cases where two implementations are too close to
+separate reliably.
+
+% =============================================================================
+\section{Scope of the Benchmark}
+\label{sec:intro-scope}
+
+One point needs stating up front, because it shapes how every later result
+should be read. This is not an apples-to-apples comparison of identically
+configured stacks. Each implementation is configured the way its own
+documentation presents it for a bulk-throughput workload, and where the
+documentation says nothing, it is left as it ships. Concretely, every stack is
+given a flow-control window scaled to the bandwidth-delay product (the QUIC
+analogue of sizing the TCP receive buffer), the same operating-system socket
+buffer tuning, CUBIC congestion control, and whatever high-throughput send path
+the project documents, such as Generic Segmentation Offload and kernel pacing.
+Where a stack requires the application to wire this up by hand, as quiche does
+because it leaves the socket to the caller, that work is done following the
+project's own reference code. Consequently, where a stack provides it internally, it is simply
+enabled. Section~\ref{subsec:config-parity} gives the details.
+
+The consequence is that the numbers in this thesis describe each implementation
+as a developer following its documentation would experience it, not some
+normalised lower bound, and not a tuning contest either. Differences that come
+from one project shipping an optimisation another lacks are treated as real,
+because a developer choosing between them would feel exactly those differences.
+The measurements also come from controlled emulation on a single Linux host
+rather than the open internet, and focus on single-stream bulk transfer rather
+than web page loads, so the goal throughout is repeatable relative comparison,
+not absolute production figures.
+
+% =============================================================================
+\section{Thesis Organisation}
+\label{sec:intro-organisation}
+
+Chapter~\ref{chapter:background} introduces the concepts the rest of the thesis
+relies on: QUIC and why it exists, the implementations under test, the network
+parameters, the emulation tooling, and random forests.
+Chapter~\ref{sec:architecture} describes how the data-collection environment,
+the training pipeline, and the live prober fit together.
+Chapter~\ref{chapter:implementation} covers the implementation in detail, from
+the container topology and condition injection through to the training pipeline
+and the prober. Chapter~\ref{chapter:evaluation} presents the results: raw
+performance, the profile label distributions, model accuracy, feature
+importance, and the live prober validation. Chapter~\ref{chapter:rel-work}
+positions the work against prior QUIC studies, and
+Chapter~\ref{chapter:conclusion} revisits the research questions and concludes.

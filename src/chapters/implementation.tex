@@ -419,9 +419,11 @@ feature helps both the timeout classifiers (Stage~1) and the profile rankers
 (Stage~2). The \texttt{fc\_limited} feature marks this regime:
 
 \[
-    \texttt{fc\_limited} = \left[ \frac{\texttt{bandwidth\_mbps} \times
+    \texttt{fc\_limited} = \mathbf{1}\!\left[ \frac{\texttt{bandwidth\_mbps} \times
     \texttt{rtt\_ms}}{8000} > 32 \right]
 \]
+where $\mathbf{1}[\cdot]$ is the indicator function, equal to 1 when the
+bracketed condition holds and 0 otherwise.
 
 We treat the 32\,MB boundary as an empirically determined threshold rather than
 a hard protocol limit. Including \texttt{fc\_limited} explicitly gives the

@@ -1,4 +1,106 @@
 \chapter{Related Work}
-\label{chpater:rel-work}
+\label{chapter:rel-work}
 
-\radu{Aici mentionezi solutii similare si spui prin ce te diferentiezi. Cam una per paragraf, dar daca sunt suficient de similare, poti include mai multe. Nu trebuie sa fie prea lunga sectiunea asta.}
+QUIC has been studied from several angles: measuring how it performs, changing
+it to perform better, documenting how much its implementations differ, and
+applying machine learning to it. This thesis sits next to all four but does
+something none of them do, which is to recommend which existing implementation
+to deploy for a given set of network conditions. This chapter goes through the
+closest work in each group and says where this thesis differs.
+
+% =============================================================================
+\section{QUIC: Existing Studies}
+\label{sec:rw-studies}
+
+% -----------------------------------------------------------------------------
+\subsection{Performance Evaluation and Benchmarking}
+\label{subsec:rw-benchmarking}
+
+The most directly related line of work measures QUIC throughput and latency
+under controlled conditions. Jaeger et al.~\cite{jaeger2023quic} extended the
+QUIC Interop Runner to benchmark several implementations on 10\,Gbit/s links
+and found that achieved throughput ranged from under 100\,Mbit/s to nearly
+5\,Gbit/s depending only on which client and server implementation was used,
+and that default OS buffer sizes were a common bottleneck. The journal version
+of that work~\cite{kempf2024quic} extends the same setup with more
+implementations and conditions. This is the closest study in spirit to the
+data collection here: it shows clearly that the choice of implementation
+dominates performance on fast links. The difference is that it stops at
+reporting the numbers, whereas this thesis \emph{turns the same kind of
+measurements into an automatic recommendation}.
+
+Zhang et al.~\cite{zhang2024quic} looked at the opposite end and showed that
+the QUIC stack can lose up to 45\% of its throughput against TCP on very fast
+connections, mostly because of the extra per-packet CPU cost of running in
+user space. Yu and Benson~\cite{yu2021dissecting} measured QUIC against
+production endpoints from Google, Facebook, and Cloudflare across a range of
+network conditions, workloads, and client implementations, and also found wide
+variation between providers. Shreedhar et al.~\cite{shreedhar2022evaluating}
+compared QUIC to TLS/TCP over web, cloud storage, and video workloads from
+several vantage points, including a low-bandwidth high-RTT residential link.
+All three confirm that QUIC sometimes wins and sometimes loses, and that the
+result depends heavily on the conditions, which is exactly the premise this
+thesis builds on. However, none of them frame the result as a decision to be
+made automatically. Instead, they \emph{describe the landscape rather than
+navigate it}.
+
+A more specialised case is Dizdarevic and Jukan~\cite{dizdarevic2021benchmarking},
+who benchmarked HTTP/QUIC in an IoT cloud/edge setting. It is mentioned here
+only briefly, as it fixes a single deployment scenario rather than sweeping
+conditions, but it is another example of the same observation that QUIC's
+benefit is conditional on the environment.
+
+% -----------------------------------------------------------------------------
+\subsection{Improving QUIC Internals}
+\label{subsec:rw-improving}
+
+A separate group of papers tries to make QUIC itself faster rather than
+compare existing versions. Kharat and Kulkarni proposed a modified QUIC that
+changes the handshake and the way the congestion window is updated to cut
+control overhead, first without~\cite{kharat2019modquic} and then
+with~\cite{kharat2021modquic} a reworked congestion control, reporting
+throughput gains over both stock QUIC and TCP. Engelbart and
+Ott~\cite{engelbart2021rtp} went after a specific use case, congestion control
+for real-time media carried over QUIC. These efforts are orthogonal to this
+thesis: they modify one implementation to raise its ceiling, while this work
+\emph{takes the implementations as they ship and picks the best one for the
+conditions}. A better congestion controller would change which implementation
+wins, but it would not remove the need to choose.
+
+% =============================================================================
+\section{Implementation Diversity}
+\label{sec:rw-diversity}
+
+The assumption underneath this entire thesis, that different QUIC
+implementations behave differently even though they follow the same
+specification, was studied directly by Marx et al.~\cite{marx2020same}. They
+compared several stacks and found large differences in flow control,
+congestion control, and stream multiplexing, along with outright bugs and
+missing optimisations. Their conclusion is that "which QUIC" is a real
+question with real performance consequences. This thesis takes that conclusion
+as its starting point. Where Marx et al. document that the choice matters and
+leave it to the reader to act on it, the recommender here \emph{turns that
+choice into something a system can make on its own from measured conditions}.
+
+% =============================================================================
+\section{Machine Learning for QUIC and Network-Aware Selection}
+\label{sec:rw-ml}
+
+Machine learning has been applied to QUIC, but for different tasks.
+Almuhammadi et al.~\cite{app2023quicensemble} used ensemble methods, including
+random forests, to classify QUIC network traffic, which is a useful precedent
+for random forests working well on QUIC-related tabular data, but the goal is
+identifying traffic rather than choosing an implementation. Zhang et
+al.~\cite{zhang2023pbq} went further inside the protocol with PBQ, a deep
+reinforcement learning congestion controller for QUIC that outperformed Cubic
+and BBR on throughput and RTT. That is machine learning tuning one
+implementation online, which is a different problem from selecting among
+several offline, and it is the kind of explore-and-exploit approach discussed
+and set aside in Section~\ref{sec:bg-random-forest}.
+
+This is the gap the thesis fills. Prior work measures QUIC, improves a single
+implementation, documents that implementations differ, or applies machine
+learning to QUIC for classification and congestion control. \textbf{None of it
+builds a network-aware model that recommends which existing implementation to
+deploy.} That recommendation, learned offline from a systematic sweep of
+conditions across five implementations, is the contribution of this work.

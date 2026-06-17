@@ -1,4 +1,83 @@
 \chapter{Conclusion}
 \label{chapter:conclusion}
 
-\radu{Reiterezi research question-urile din introducere si spui cum le-ai adresat. Lumea de obicei citeste abstractul si concluziile pentru a-si da seama daca sunt interesati de lucrare.}
+The choice of QUIC implementation, or of QUIC versus TCP, has a large effect on
+performance, but the best choice is not fixed: it depends on the network the
+connection runs over and on what the deployment is optimising for. This thesis
+set out to turn that decision into something measurable and automatic. It did so
+by building a benchmarking framework, collecting a dataset across five
+implementations and a wide range of network conditions, training a recommender
+on it, and exposing that recommender through a live prober. The three research
+questions from Chapter~\ref{chapter:introduction} can now be answered.
+
+\textbf{RQ1: Does the best transport implementation depend on network conditions
+and deployment priorities, or is there a single overall winner?} There is no
+single winner, and the network conditions on their own are enough to move it.
+Under clean traffic, TCP and msquic win most of the bandwidth/RTT grid, but
+quiche takes over at high bandwidth-delay product, where its GSO-assisted send
+path keeps the pipe full while the others cannot. Introduce 2\% packet loss and
+quiche claims a large part of the grid from msquic, whose timeout risk climbs.
+The RTT sweep shows the recommendation flipping from msquic at 10\,ms to TCP
+beyond 60\,ms, and at the extreme corner of the grid (5\,Gbps, 300\,ms,
+BDP\,$\approx$\,187\,MB) quiche and quic-go fall below 2\% link utilisation while
+the link itself is idle. \emph{The winning implementation tracks the conditions
+directly}: bandwidth, RTT through the BDP, and loss each move it. The deployment
+profile then adds a second axis on top of this. For the very same condition the
+datacenter profile favours quiche, which wins about 90\% of conditions under it,
+while the lightweight profile favours TCP at over 99\%, and across the five
+profiles the recommended implementation disagrees in up to 97.8\% of conditions.
+Both the conditions and the priorities matter, which is exactly what makes a
+single static default a poor choice.
+
+\textbf{RQ2: Can a model trained offline on emulated measurements predict the
+right implementation, and how accurately?} Yes, though the accuracy depends on
+how cleanly the conditions separate the implementations. The recommender is a
+two-stage random forest. Stage~1 predicts per-implementation timeout risk and is
+near-perfect for four implementations, reaching 85.7\% for msquic, whose
+failures sit on a genuinely noisy boundary at high BDP. Stage~2 ranks the
+survivors for a given profile, scoring from 94.4\% on the datacenter profile
+down to 67.8\% on the latency-sensitive one. That floor is not a modelling
+failure: in 23.5\% of latency-sensitive conditions the top two implementations
+score within 5\% of each other, so the label itself is close to a coin flip and
+the model performs near the ceiling that ambiguity allows. Cross-validation and
+out-of-bag scores agree closely across every profile, which means the
+condition-level GroupKFold splits are not leaking repetitions and the reported
+numbers are honest.
+
+\textbf{RQ3: Can the recommender run against a live connection?} Yes. The prober
+was run inside the same Docker topology used for data collection. It reproduced
+the configured RTT to within 1\,ms, recovered the other conditions (with loss
+correctly measured higher than configured, because each packet crosses the
+impairment twice), and produced a recommendation with a confidence value and a
+STABLE/UNSTABLE flag on every profile tested. It also behaves sensibly at the
+edges. In the deep-space case it eliminates three QUIC stacks on timeout risk
+and recommends TCP at full confidence. In the mobile-lossy case, where measured
+loss ran above the training range, Stage~2 rates quiche the best raw performer
+but Stage~1 eliminates it on timeout risk, so the recommender falls back to TCP
+and reports that quiche was the faster but less reliable option.
+
+% =============================================================================
+\section{Limitations}
+\label{sec:conclusion-limitations}
+
+These results come with limits worth stating plainly. The measurements are from
+controlled \texttt{tc/netem} emulation on a single Linux host, not the open
+internet, and they cover single-stream bulk transfer rather than the
+multiplexed, request-response traffic of a real web workload. The five
+implementations are tested as their documentation configures them for
+throughput, which means the comparison is deliberately not apples-to-apples:
+differences that come from one project shipping an optimisation another lacks
+are kept rather than normalised away, because that is what a developer choosing
+between them would actually experience. The msquic flow-control boundary that
+the \texttt{fc\_limited} feature encodes is an empirical, configuration-dependent
+threshold, the 32\,MB initial per-stream window we set, not a hard protocol
+limit, and a different window setting could move it. Two of the five
+implementations, mvfst and quic-go, win so rarely under every profile that they
+are thinly represented as Stage~2 labels, so the recommender's ability to choose
+them confidently is correspondingly weak. None of these undermine the central
+result, but they bound how far it should be generalised.
+
+Within those bounds, the thesis shows that picking a transport implementation is
+a decision worth making per deployment rather than once, and that a small,
+explainable model trained on emulated measurements can make it from conditions
+that are cheap to observe.

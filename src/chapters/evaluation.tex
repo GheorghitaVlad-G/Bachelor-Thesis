@@ -22,16 +22,10 @@ Each combination was repeated 10 times to average out measurement noise.
 
 One derived binary feature, \texttt{fc\_limited}, marks conditions where the
 bandwidth-delay product exceeds 32\,MB, the initial per-stream receive window
-configured for msquic. Past this point msquic's timeout rate rises sharply
-(Section~\ref{subsec:fc-limited}), so the feature captures the onset of its
-degradation regime:
-\[
-  \texttt{fc\_limited} = \mathbf{1}\!\left[
-    \frac{\text{bandwidth\_mbps} \times \text{rtt\_ms}}{8000} > 32
-  \right]
-\]
-This flag is relevant primarily in Stage~1, where it predicts msquic timeout
-risk at high BDP.
+configured for msquic. Past this point msquic's timeout rate rises sharply,
+so the feature captures the onset of its degradation regime. The feature is
+defined in Section~\ref{subsec:fc-limited} and is relevant primarily in Stage~1,
+where it predicts msquic timeout risk at high BDP.
 
 A second dataset covers a systematic $20\times 20$ grid: bandwidth from 250
 to 5,000\,Mbps in 250\,Mbps steps, RTT from 15 to 300\,ms in 15\,ms steps.
@@ -181,7 +175,7 @@ is what Stage~1 of the recommender is built to predict.
 Raw performance data shows that implementations differ, but choosing the right
 one depends on what the deployment cares about. The five profiles defined in
 Section~\ref{subsec:profiles} assign a composite score per implementation per
-condition using different weightings of goodput, latency, resource usage, and
+condition using different weights for goodput, latency, resource usage, and
 loss recovery. The winner under each profile becomes the training label for
 Stage~2.
 

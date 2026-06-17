@@ -1,3 +1,12 @@
-% This file contains the abstract of the thesis
-
-Here goes the abstract about \project. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Aenean aliquam lectus vel orci malesuada accumsan. Sed lacinia egestas tortor, eget tristique dolor congue sit amet. Curabitur ut nisl a nisi consequat mollis sit amet quis nisl. Vestibulum hendrerit velit at odio sodales pretium. Nam quis tortor sed ante varius sodales. Etiam lacus arcu, placerat sed laoreet a, facilisis sed nunc. Nam gravida fringilla ligula, eu congue lorem feugiat eu.
+We present a system that recommends which transport implementation to deploy
+for a given network, choosing among four QUIC implementations and a TCP
+baseline. No implementation is fastest everywhere, and QUIC sometimes loses to
+TCP, so the best choice depends on the network conditions and on the
+deployment's priorities. We build a Docker and \texttt{tc/netem} benchmarking
+framework, measure all five across a wide grid of conditions into a
+216,000-run dataset, and train a two-stage random forest: the first stage
+discards implementations likely to time out, the second ranks the rest for a
+chosen profile. A live prober applies the trained model to a freshly measured
+connection. Our evaluation shows that the best choice shifts with conditions
+and priorities, that the model predicts it accurately, and that the prober
+works in practice.

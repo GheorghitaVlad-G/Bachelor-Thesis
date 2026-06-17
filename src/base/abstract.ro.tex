@@ -1,0 +1,19 @@
+Prezent\u{a}m un sistem care recomand\u{a} ce implementare de transport s\u{a} fie
+folosit\u{a} pentru o anumit\u{a} re\c{t}ea, aleg\^{a}nd dintre patru
+implement\u{a}ri QUIC \c{s}i o referin\c{t}\u{a} bazat\u{a} pe TCP. Nicio
+implementare nu este cea mai rapid\u{a} \^{i}n toate situa\c{t}iile, iar
+\^{i}n anumite condi\c{t}ii QUIC poate fi dep\u{a}\c{s}it de TCP, astfel
+\^{i}nc\^{a}t alegerea optim\u{a} depinde at\^{a}t de condi\c{t}iile
+re\c{t}elei, c\^{a}t \c{s}i de priorit\u{a}\c{t}ile aplica\c{t}iei. Construim un
+framework de benchmark bazat pe Docker \c{s}i \texttt{tc/netem}, evalu\u{a}m
+toate cele cinci implement\u{a}ri pe o gam\u{a} larg\u{a} de condi\c{t}ii de
+re\c{t}ea \c{s}i ob\c{t}inem un set de date format din 216.000 de rul\u{a}ri. Pe
+baza acestuia antren\u{a}m un model Random Forest \^{i}n dou\u{a} etape: prima
+etap\u{a} elimin\u{a} implement\u{a}rile cu probabilitate ridicat\u{a} de
+timeout, iar a doua le clasific\u{a} pe cele r\u{a}mase \^{i}n func\c{t}ie de un
+profil ales. Un prober care ruleaz\u{a} \^{i}n timp real aplic\u{a} modelul
+antrenat unei conexiuni m\u{a}surate pe loc. Evaluarea noastr\u{a} arat\u{a}
+c\u{a} alegerea optim\u{a} variaz\u{a} \^{i}n func\c{t}ie de condi\c{t}iile
+re\c{t}elei \c{s}i de priorit\u{a}\c{t}ile urm\u{a}rite, c\u{a} modelul poate
+prezice aceast\u{a} alegere cu acurate\c{t}e \c{s}i c\u{a} prober-ul
+func\c{t}ioneaz\u{a} \^{i}n practic\u{a}.
