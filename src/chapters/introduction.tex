@@ -65,8 +65,10 @@ produced a dataset of 216{,}000 labelled runs.
 \textbf{A two-stage recommender.} The model first eliminates implementations
 likely to time out under the given conditions, then ranks the survivors with a
 profile-specific classifier built on random forests. The profile scoring is
-generic: a new deployment priority can be added by defining a weight vector,
-without re-running any experiments.
+generic: a new deployment priority can be added by defining a weight vector and
+retraining only Stage~2 on the existing dataset, without collecting any new
+measurements. Extending the dataset itself, with either a new implementation or with
+new conditions, is a separate offline step (see Section~\ref{subsec:normalisation}).
 
 \textbf{A live network prober.} A deployment tool measures a real connection's
 conditions and feeds them to the recommender, returning a ranked recommendation

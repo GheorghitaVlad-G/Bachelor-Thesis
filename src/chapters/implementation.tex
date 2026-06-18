@@ -299,10 +299,15 @@ of this kind. For each profile, a scalar composite score is computed per
 the implementation with the highest score within a condition becomes the
 training label for that profile.
 
-This design means that adding a new profile requires only defining its weight
-vector in \texttt{train.py} and rerunning Stage~2 training. The rest of the
-pipeline (normalisation, label assignment, cross-validation, model serialisation)
-is driven by the same loop and requires no further changes.
+This design means that adding a new profile \emph{over the existing dataset}
+requires only defining its weight vector in \texttt{train.py} and rerunning
+Stage~2 training. The rest of the pipeline (normalisation, label assignment,
+cross-validation, model serialisation) is driven by the same loop and requires
+no further changes, and crucially no new measurements: the profile is just a
+different scoring of data already collected. This is distinct from extending the
+dataset with a new implementation or new conditions, which does require new
+measurements and recomputing the per-condition normalisation
+(Section~\ref{subsec:normalisation}).
 
 Five profiles were defined as examples of realistic deployment scenarios:
 
@@ -362,7 +367,8 @@ these profiles.
 An operator with different priorities, a video streaming service that
 cares primarily about tail latency at moderate loss rates for example,
 could define a custom profile with appropriate weights and obtain a tailored
-classifier from the same dataset without re-running any experiments.
+classifier from the same dataset, retraining only Stage~2 and without collecting
+any new measurements.
 
 \subsection{Per-condition normalisation}
 \label{subsec:normalisation}
