@@ -75,15 +75,17 @@ an absolute throughput number.
 At low RTT, TCP and msquic nearly saturate the link. As RTT grows, every
 implementation degrades but at very different rates. At 5,000\,Mbps and
 300\,ms RTT (BDP $\approx 187$\,MB), quiche, quic-go, and mvfst all fall to
-roughly 1--2\% utilisation, unable to fill the pipe. msquic does better at 62\%,
+roughly 1-2\% utilisation, unable to fill the pipe. msquic does better at 62\%,
 but is still far from line-rate. The link is not congested, which means the
 implementations are the bottleneck. This spread is one of the main things
 the recommender needs to capture.
 
 Figure~\ref{fig:winner-map-raw} shows which implementation has the highest
-raw goodput in each cell under clean conditions. TCP and msquic win most of
-the grid. quiche dominates at high BDP where its GSO-assisted send path
-compensates for its higher-latency userspace stack.
+raw goodput in each cell under clean conditions. msquic and TCP win almost
+the entire grid, about 97\% of cells between them: msquic takes the
+high-bandwidth and high-RTT region, TCP holds a band of lower and mid
+bandwidths, and quic-go wins only a handful of low-bandwidth, low-RTT cells.
+quiche and mvfst never have the highest raw goodput under clean conditions.
 
 \begin{figure}[htbp]
   \centering
@@ -107,10 +109,13 @@ when loss reaches 2\% or jitter 10\,ms.
   \label{fig:degradation}
 \end{figure}
 
-msquic degrades the most under loss in the low-BW, low-RTT region, the same
-conditions where it was strongest in the clean case. quiche is comparatively
-stable. The jitter row shows a more modest, spread-out degradation across
-all implementations.
+Loss hits every implementation hard. At 2\% loss the whole grid turns red:
+goodput collapses across the board, but quiche holds up best, losing around
+90\% of its clean throughput where msquic, mvfst, quic-go, and TCP all lose
+98\% or more. That margin is what lets quiche win every cell once loss is
+present. Jitter is more selective. At 10\,ms, msquic and quiche are barely
+affected, while quic-go, mvfst, and TCP each lose somewhere between 45 and
+70\% of their goodput.
 
 Figure~\ref{fig:condition-winners} brings this together: the best-goodput
 winner per cell under three conditions side by side.
