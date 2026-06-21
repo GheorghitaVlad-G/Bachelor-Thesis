@@ -32,13 +32,15 @@ computationally expensive happens offline.
 \section{Test Topology}
 \label{subsec:topology}
 
-Data collection runs inside a three-container Docker Compose setup.
-Figure~\ref{fig:topology} shows the layout.
+Data collection runs inside a Docker Compose setup of four containers: the
+client, the server, the simulator that connects them, and a dedicated iperf3
+target that absorbs optional competing traffic. Figure~\ref{fig:topology} shows
+the layout.
 
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\textwidth]{src/img/arch/fig_topology.pdf}
-  \caption{Docker Compose test topology. Each of the three containers runs in
+  \caption{Docker Compose test topology. Each container runs in
            its own network namespace, shown with a distinct background colour.
            The two Docker bridge networks, \texttt{client\_net} (172.28.0.0/24)
            and \texttt{server\_net} (172.28.100.0/24), are separate layer-2
@@ -46,7 +48,12 @@ Figure~\ref{fig:topology} shows the layout.
            The simulator is a single namespace with one interface on each bridge
            (\texttt{eth0} at 172.28.0.2/24, \texttt{eth1} at 172.28.100.2/24) and
            is the only forwarding path between the endpoints, applying
-           \texttt{tc netem} impairments on both legs.}
+           \texttt{tc netem} impairments on both legs. The iperf3 target
+           (172.28.0.200/24 on \texttt{client\_net}, shown dashed) is the sink
+           for the optional competing traffic the simulator generates. The
+           competing traffic egresses through the same \texttt{eth0} netem qdisc
+           as the server-to-client application data, so it contends on the same
+           bottleneck.}
   \label{fig:topology}
 \end{figure}
 
@@ -57,6 +64,14 @@ a separate network namespace: the simulator holds two veth interfaces, one on
 each bridge, rather than belonging to both networks as a single shared entity.
 Static routes are added at container startup so all traffic between client and
 server goes through the simulator. Neither side can reach the other directly.
+
+A fourth container, the iperf3 target, sits on \texttt{client\_net} at
+172.28.0.200, which has no part in the application transfer under test. The container's
+only job is to receive the competing TCP or UDP streams that the simulator optionally
+generates with iperf3. Because that traffic leaves the simulator through
+\texttt{eth0}, it crosses the same netem qdisc as the real server-to-client data
+and competes with it for the shaped bandwidth, approximating cross-traffic on a
+shared bottleneck link. When competing traffic is disabled, the target sits idle.
 
 Impairments are configured with \texttt{tc netem} on the simulator's egress
 interfaces, meaning every packet in either direction crosses a netem qdisc.
