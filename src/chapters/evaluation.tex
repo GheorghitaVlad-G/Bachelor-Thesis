@@ -226,8 +226,12 @@ reflecting conditions where quiche's throughput advantage trades off against
 TCP's lower overhead. mvfst and quic-go never win enough to matter in any
 profile.
 
-Figure~\ref{fig:winner-maps-profiles} shows the same data spatially: which
-implementation wins per (bandwidth, RTT) cell for each profile.
+Figure~\ref{fig:winner-maps-profiles} applies the same profile scoring
+functions spatially, showing which implementation wins per (bandwidth, RTT)
+cell. These maps are computed on the $20\times 20$ visualisation grid rather
+than the full dataset, so they illustrate the same decision logic as
+Table~\ref{tab:winner-dist} rather than a spatial breakdown of its exact
+percentages.
 
 \begin{figure}[htbp]
   \centering
